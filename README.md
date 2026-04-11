@@ -76,11 +76,24 @@ By default, tracks are instrumental. Turn on **vocals mode** and Haiku will writ
 
 Debugging auth middleware? You might hear a verse about chasing down a rogue session token. Shipping a PR? Expect a triumphant chorus about merging to main.
 
+## Backends
+
+The daemon ships with two music generators — pick one during `npm run setup`:
+
+| Backend | Cost | Vocals | Speed | Hardware |
+|---------|------|--------|-------|----------|
+| **ElevenLabs** (default) | Paid (~$22/mo for daily use) | Yes | Fast (cloud) | Any |
+| **Local MusicGen** | Free | No (instrumental only) | 30s–2min per clip | Apple Silicon (MPS) or Nvidia GPU strongly recommended |
+
+**Local mode** runs Meta's [MusicGen](https://github.com/facebookresearch/audiocraft) on your own hardware via a small Python worker the daemon manages. No ElevenLabs key, no API calls, no credit ceiling — but it's instrumental only (vocals mode is force-disabled when local is selected) and you'll want a GPU. Run `npm run setup:local` to bootstrap the venv (uv → Python 3.11 → torch → audiocraft); see [the local backend section](#local-mode) below.
+
 ## Requirements
 
 - **Node.js >= 18**
 - **Claude Code** (uses headless mode for mood classification)
-- **[ElevenLabs API key](https://elevenlabs.io)** — see [credit budget](#elevenlabs-credit-budget) below; **Creator tier recommended**
+- One of:
+  - **[ElevenLabs API key](https://elevenlabs.io)** — see [credit budget](#elevenlabs-credit-budget) below; **Creator tier recommended**
+  - **Local backend hardware** — Apple Silicon Mac, or Linux/Windows with an Nvidia GPU + CUDA 12. CPU-only works but is too slow for daily use.
 - An audio playback backend for your OS:
   - **macOS**: `afplay` (pre-installed — nothing to do)
   - **Linux**: `ffplay` from [ffmpeg](https://ffmpeg.org/) — e.g. `sudo apt install ffmpeg` or `sudo dnf install ffmpeg`
@@ -102,6 +115,45 @@ Even so, Free runs dry after a session or two and Starter won't last a week of d
 
 When your credits run out, cached tracks keep playing but the status line will show `⚠ ElevenLabs out of credits` and no new music will generate until you top up or upgrade.
 
+## Local mode
+
+If you'd rather not pay for ElevenLabs (or you've burned through your credits and want to keep generating fresh tracks), the local backend runs [Meta's MusicGen](https://github.com/facebookresearch/audiocraft) on your own machine. Free, unlimited, and instrumental.
+
+```bash
+npm run setup        # pick "local" when asked
+# or, if you've already run setup:
+npm run setup:local  # just bootstraps the local backend
+```
+
+`setup:local` will:
+
+1. Install [uv](https://docs.astral.sh/uv/) if you don't have it.
+2. Create a Python 3.11 venv at `~/.vibe/venv`.
+3. Install `torch` + `torchaudio` from the right wheel index for your system:
+   - **macOS** (any Mac, including Apple Silicon) → default PyPI; MPS support is in the standard wheel.
+   - **Linux/Windows + Nvidia GPU** → CUDA 12.1 wheels.
+   - **Linux/Windows, no GPU** → CPU wheels (with a loud warning — generation will be too slow for real use).
+4. Install `audiocraft==1.3.0`.
+5. Write a `local` config block into `~/.vibe/config.json` with `provider="local"`.
+
+### Choosing a model size
+
+| Size | Download | VRAM/RAM | Quality | Speed |
+|------|----------|----------|---------|-------|
+| `small` | ~1.5 GB | ~4 GB | OK | Fast |
+| **`medium`** (default) | ~3.3 GB | ~7 GB | Good | Medium |
+| `large` | ~13 GB | ~16 GB | Best | Slow |
+
+Models are cached under `~/.vibe/models` (via `HF_HOME`) so `npm run uninstall` cleans them up too.
+
+### How it runs
+
+The daemon spawns `python/worker.py` as a child process at boot. The worker hosts the MusicGen model, prints `VIBE_WORKER_READY` on stdout when loaded, and serves `POST /generate` on a loopback port with an `X-Vibe-Token` shared secret. The Node side just `fetch()`es it like any other generator. If the worker dies, the daemon enters degraded mode and surfaces an error in the status line — restart your Claude Code session to recover.
+
+### Vocals are off in local mode
+
+MusicGen is instrumental-only. `loadConfig()` enforces this: when `provider === "local"` it forces `vocals = false`, even if you hand-edit `config.json`. The setup CLI also skips the vocals prompt when local is selected.
+
 ## Install
 
 ```bash
@@ -113,13 +165,15 @@ npm run setup
 ```
 
 The setup wizard will:
-1. Ask for your ElevenLabs API key
-2. Set your preferred volume
-3. Let you exclude genres you don't want
-4. Ask if you want **interesting vibes** (cross-genre mashups) or normal
-5. Ask if you want **vocals** (Haiku writes lyrics) or instrumental
-6. Install hook scripts to `~/.vibe/hooks/` and the `/vibe` skill to `~/.claude/skills/vibe/`
-7. Patch `~/.claude/settings.json` with hooks and status line config
+1. Ask which backend you want — **ElevenLabs** (cloud) or **local** (MusicGen)
+2. If local: ask model size and shell out to `scripts/install-local.mjs` (uv → venv → torch → audiocraft)
+3. If ElevenLabs: ask for your API key
+4. Set your preferred volume
+5. Let you exclude genres you don't want
+6. Ask if you want **interesting vibes** (cross-genre mashups) or normal
+7. Ask if you want **vocals** (Haiku writes lyrics) or instrumental — skipped in local mode
+8. Install hook scripts to `~/.vibe/hooks/` and the `/vibe` skill to `~/.claude/skills/vibe/`
+9. Patch `~/.claude/settings.json` with hooks and status line config
 
 ## Usage
 
@@ -208,13 +262,32 @@ SessionEnd event, and the daemon shuts itself down once its last session ends.
 
 ```json
 {
+  "provider": "elevenlabs",
   "elevenLabsApiKey": "sk-...",
   "volume": 0.3,
   "port": 7773,
   "enabled": true,
   "excludedGenres": ["metal", "country"],
   "interestingVibes": false,
-  "vocals": false
+  "vocals": false,
+  "local": null
+}
+```
+
+In local mode, the `local` block is populated and `provider` flips:
+
+```json
+{
+  "provider": "local",
+  "vocals": false,
+  "local": {
+    "backend": "musicgen",
+    "size": "medium",
+    "device": "mps",
+    "workerPort": 7774,
+    "pythonPath": "/Users/you/.vibe/venv/bin/python",
+    "modelCacheDir": "/Users/you/.vibe/models"
+  }
 }
 ```
 

@@ -1,5 +1,10 @@
 import { Player } from "./player.js";
-import { getCachedTracks, generateTrack, QuotaExceededError } from "./elevenlabs.js";
+import { getCachedTracks } from "./cache.js";
+import {
+  type MusicGenerator,
+  QuotaExceededError,
+  GeneratorUnavailableError,
+} from "./generators/types.js";
 import { MOOD_DEFINITIONS, MOOD_TRANSITIONS, buildMusicPrompt, type Mood } from "./moods.js";
 import { updateState } from "./state.js";
 
@@ -11,6 +16,7 @@ export interface PlaylistOptions {
   genreHint: string | null;
   cacheSizePerMood: number;
   cacheOnlyMode: boolean;
+  generator: MusicGenerator;
 }
 
 interface PendingMoodState {
@@ -32,6 +38,7 @@ export class Playlist {
   private static readonly MIN_MOOD_LIFETIME_MS = 60_000;
 
   private player: Player;
+  private generator: MusicGenerator;
   private currentMood: Mood | null = null;
   private pendingMood: PendingMoodState | null = null;
   private trackQueue: string[] = [];
@@ -47,15 +54,20 @@ export class Playlist {
   // audio freshness.
   private moodStartedAt = 0;
   private promoteTimer: NodeJS.Timeout | null = null;
-  // Serializes all ElevenLabs generation requests — exactly one in flight.
+  // Serializes all generator requests — exactly one in flight.
   private genLock: Promise<void> = Promise.resolve();
   private genBusy = false;
   // Sticky once the API reports quota exhaustion — suppresses further
   // generation (cached tracks still play) until the daemon restarts.
   private quotaExceeded = false;
+  // Sticky when the generator itself is unavailable (e.g. missing API key,
+  // local worker failed to start). Same semantics as quotaExceeded: cached
+  // tracks still play, but no new generation is attempted.
+  private generatorUnavailable = false;
 
   constructor(opts: PlaylistOptions) {
     this.opts = opts;
+    this.generator = opts.generator;
     this.volume = opts.volume;
     this.player = new Player(opts.volume);
     this.player.onEnd(() => this.onTrackFinished());
@@ -255,9 +267,9 @@ export class Playlist {
       return;
     }
 
-    if (this.quotaExceeded) {
-      // Nothing cached and no credits to generate — drop the pending mood so
-      // the status line doesn't claim a cut-over that will never happen.
+    if (this.quotaExceeded || this.generatorUnavailable) {
+      // Nothing cached and no way to generate — drop the pending mood so the
+      // status line doesn't claim a cut-over that will never happen.
       if (this.pendingMood === pending) {
         this.pendingMood = null;
         updateState({ pendingMood: null });
@@ -284,7 +296,7 @@ export class Playlist {
             return { kind: "cache" as const, paths: shuffle([...fresh]) };
           }
         }
-        const path = await generateTrack({
+        const path = await this.generator.generateTrack({
           mood,
           musicPrompt: prompt,
           lyrics: pending.lyrics,
@@ -319,6 +331,13 @@ export class Playlist {
         updateState({
           generating: false,
           quotaExceeded: true,
+          pendingMood: null,
+          error: err.message,
+        });
+      } else if (err instanceof GeneratorUnavailableError) {
+        this.generatorUnavailable = true;
+        updateState({
+          generating: false,
           pendingMood: null,
           error: err.message,
         });
@@ -376,14 +395,14 @@ export class Playlist {
       this.trackQueue = shuffle([...cached]);
       this.playCurrentTrack();
       this.moodStartedAt = Date.now();
-    } else if (this.quotaExceeded && cached.length > 0) {
-      // Credits blown but we have *something* cached — play it rather than
-      // silence, even if we're below the nominal cap.
+    } else if ((this.quotaExceeded || this.generatorUnavailable) && cached.length > 0) {
+      // Generation blocked (quota or unavailable) but we have *something*
+      // cached — play it rather than silence, even below the nominal cap.
       this.trackQueue = shuffle([...cached]);
       this.playCurrentTrack();
       this.moodStartedAt = Date.now();
-    } else if (this.quotaExceeded) {
-      // Quota is blown and nothing cached — don't interrupt whatever is
+    } else if (this.quotaExceeded || this.generatorUnavailable) {
+      // Generation blocked and nothing cached — don't interrupt whatever is
       // currently playing; just surface the warning.
       updateState({ generating: false });
     } else {
@@ -409,7 +428,7 @@ export class Playlist {
               return { kind: "cache" as const, tracks: freshCache };
             }
           }
-          const path = await generateTrack({
+          const path = await this.generator.generateTrack({
             mood,
             musicPrompt: prompt,
             lyrics,
@@ -440,6 +459,16 @@ export class Playlist {
           updateState({
             generating: false,
             quotaExceeded: true,
+            currentMood: null,
+            error: err.message,
+          });
+          return;
+        }
+        if (err instanceof GeneratorUnavailableError) {
+          this.generatorUnavailable = true;
+          this.currentMood = null;
+          updateState({
+            generating: false,
             currentMood: null,
             error: err.message,
           });
@@ -478,7 +507,13 @@ export class Playlist {
     // Speculative — skip if gen is busy, vocals mode (session-specific
     // lyrics can't be speculated), quota is out, or cache-only mode (never
     // generates, period).
-    if (this.genBusy || this.opts.vocals || this.quotaExceeded || this.opts.cacheOnlyMode) return;
+    if (
+      this.genBusy ||
+      this.opts.vocals ||
+      this.quotaExceeded ||
+      this.generatorUnavailable ||
+      this.opts.cacheOnlyMode
+    ) return;
     // Skip prefetch whenever session- or one-shot steering is active. The
     // prefetched track would be cached under `target`'s directory and later
     // reused by *other* sessions (with their own steering), baking the
@@ -514,7 +549,7 @@ export class Playlist {
         // the outer selection threshold (cap) or prefetch plateaus at 1
         // track per adjacent mood, defeating the warmup/variety model.
         if (getCachedTracks(target).length >= this.opts.cacheSizePerMood) return;
-        await generateTrack({
+        await this.generator.generateTrack({
           mood: target,
           musicPrompt: prompt,
           lyrics: null,
@@ -525,6 +560,9 @@ export class Playlist {
       if (err instanceof QuotaExceededError) {
         this.quotaExceeded = true;
         updateState({ quotaExceeded: true, error: err.message });
+      } else if (err instanceof GeneratorUnavailableError) {
+        this.generatorUnavailable = true;
+        updateState({ error: err.message });
       }
       // Otherwise non-critical — speculative prefetch.
     }

@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 
 import { createInterface } from "node:readline";
-import { readFileSync, writeFileSync, existsSync, copyFileSync, chmodSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, copyFileSync, chmodSync, mkdirSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { homedir } from "node:os";
+import { homedir, platform } from "node:os";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { loadConfig, saveConfig, ensureVibeDir, getVibeDir } from "./config.js";
+import { loadConfig, saveConfig, ensureVibeDir, getVibeDir, type LocalModelSize } from "./config.js";
 import { GENRES } from "./genres.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -31,25 +32,72 @@ async function main(): Promise<void> {
   console.log("");
 
   const config = loadConfig();
+  const previousProvider = config.provider;
+  const previousLocal = config.local;
+  const previousVocals = config.vocals;
 
-  // ── 1. ElevenLabs API key ──
-  console.log("  ── API Key ──\n");
-  console.log("  Heads up: ElevenLabs Music burns ~1,500 credits/min of audio.");
-  console.log("  Tiers stack additively. Monthly totals (3-min tracks):");
-  console.log("    Free      10k  →  ~6 min    (~2 tracks)");
-  console.log("    Starter   40k  →  ~27 min   (~9 tracks)");
-  console.log("    Creator  161k  →  ~107 min  (~35 tracks)  ← recommended");
-  console.log("  See elevenlabs.io/pricing.\n");
-  const existingKey = config.elevenLabsApiKey;
-  const keyPrompt = existingKey
-    ? `  ElevenLabs API key [${existingKey.slice(0, 8)}...]: `
-    : "  ElevenLabs API key (from elevenlabs.io): ";
+  // ── 1. Backend selection ──
+  // Two providers today: ElevenLabs (cloud, paid, vocals supported) and
+  // local MusicGen (free, instrumental only, needs GPU for usable speed).
+  console.log("  ── Backend ──\n");
+  console.log("  ElevenLabs (cloud) — paid API, supports vocals, fast.");
+  console.log("    Burns ~1,500 credits/min; Creator tier (~$22/mo) lasts ~35 tracks.");
+  console.log("  Local MusicGen     — free, instrumental only, runs on your hardware.");
+  console.log("    Needs Apple Silicon (MPS) or Nvidia GPU for usable speed.\n");
 
-  const newKey = await ask(keyPrompt);
-  if (newKey) {
-    config.elevenLabsApiKey = newKey;
-  } else if (!existingKey) {
-    console.log("  No key provided. Set ELEVENLABS_API_KEY env var later.\n");
+  const currentBackend = config.provider;
+  const backendAnswer = (
+    await ask(`  Backend? (elevenlabs/local) [${currentBackend}]: `)
+  ).toLowerCase();
+  let selectedProvider = currentBackend;
+  if (backendAnswer === "local" || backendAnswer === "l") {
+    selectedProvider = "local";
+  } else if (backendAnswer === "elevenlabs" || backendAnswer === "e") {
+    selectedProvider = "elevenlabs";
+  }
+  config.provider = selectedProvider;
+  console.log(`  Backend: ${config.provider}\n`);
+
+  // ── 1a. Local backend setup ──
+  // Ask for model size, then shell out to install-local.mjs which sets up
+  // uv, the venv, torch + audiocraft, and writes the local config block.
+  // After it returns we reload the config so the rest of setup sees the
+  // freshly-written `local` section.
+  if (config.provider === "local") {
+    const localReady = await runLocalBackendSetup(config);
+    if (!localReady && !previousLocal) {
+      config.provider = previousProvider;
+      config.local = previousLocal;
+      config.vocals = previousVocals;
+      console.log("  Local backend is not configured yet — keeping the previous backend.\n");
+    } else {
+      // install-local.mjs forces vocals=false; respect that here too.
+      config.vocals = false;
+    }
+  }
+
+  // ── 2. ElevenLabs API key ──
+  // Only relevant when provider === "elevenlabs". Local users skip this entire
+  // block — no key needed, no key prompted for.
+  if (config.provider === "elevenlabs") {
+    console.log("  ── API Key ──\n");
+    console.log("  Heads up: ElevenLabs Music burns ~1,500 credits/min of audio.");
+    console.log("  Tiers stack additively. Monthly totals (3-min tracks):");
+    console.log("    Free      10k  →  ~6 min    (~2 tracks)");
+    console.log("    Starter   40k  →  ~27 min   (~9 tracks)");
+    console.log("    Creator  161k  →  ~107 min  (~35 tracks)  ← recommended");
+    console.log("  See elevenlabs.io/pricing.\n");
+    const existingKey = config.elevenLabsApiKey;
+    const keyPrompt = existingKey
+      ? `  ElevenLabs API key [${existingKey.slice(0, 8)}...]: `
+      : "  ElevenLabs API key (from elevenlabs.io): ";
+
+    const newKey = await ask(keyPrompt);
+    if (newKey) {
+      config.elevenLabsApiKey = newKey;
+    } else if (!existingKey) {
+      console.log("  No key provided. Set ELEVENLABS_API_KEY env var later.\n");
+    }
   }
 
   // ── 2. Volume ──
@@ -161,22 +209,29 @@ async function main(): Promise<void> {
   );
 
   // ── 5. Vocals ──
-  console.log("\n  ── Vocals ──\n");
-  console.log("  Instrumental: pure background music (default)");
-  console.log("  Vocals: Haiku writes lyrics about your code and the AI sings them\n");
+  // Local backend can't generate vocals (MusicGen is instrumental-only), so
+  // skip the prompt entirely and leave vocals=false from the local-setup step.
+  if (config.provider === "local") {
+    console.log("\n  ── Vocals ──\n");
+    console.log("  Local backend is instrumental only — skipping vocals prompt.");
+  } else {
+    console.log("\n  ── Vocals ──\n");
+    console.log("  Instrumental: pure background music (default)");
+    console.log("  Vocals: Haiku writes lyrics about your code and the AI sings them\n");
 
-  const currentVocals = config.vocals ? "vocals" : "instrumental";
-  const vocalsAnswer = await ask(
-    `  Vocals? (instrumental/vocals) [${currentVocals}]: `
-  );
-  if (vocalsAnswer.toLowerCase().startsWith("v")) {
-    config.vocals = true;
-  } else if (vocalsAnswer.toLowerCase().startsWith("i")) {
-    config.vocals = false;
+    const currentVocals = config.vocals ? "vocals" : "instrumental";
+    const vocalsAnswer = await ask(
+      `  Vocals? (instrumental/vocals) [${currentVocals}]: `
+    );
+    if (vocalsAnswer.toLowerCase().startsWith("v")) {
+      config.vocals = true;
+    } else if (vocalsAnswer.toLowerCase().startsWith("i")) {
+      config.vocals = false;
+    }
+    console.log(
+      `  Mode: ${config.vocals ? "Vocals — Haiku writes the lyrics" : "Instrumental"}`
+    );
   }
-  console.log(
-    `  Mode: ${config.vocals ? "Vocals — Haiku writes the lyrics" : "Instrumental"}`
-  );
 
   // ── 6. Save config ──
   saveConfig(config);
@@ -229,15 +284,28 @@ async function main(): Promise<void> {
 
   console.log(`  Hook scripts installed to ${hooksDir}`);
 
-  // ── 7b. Install /vibe skill ──
-  const skillSrcPath = join(__dirname, "skills", "vibe", "SKILL.md");
-  if (existsSync(skillSrcPath)) {
-    const skillDir = join(homedir(), ".claude", "skills", "vibe");
-    if (!existsSync(skillDir)) {
-      mkdirSync(skillDir, { recursive: true });
+  // ── 7b. Install skills ──
+  const skillsSrcDir = join(__dirname, "skills");
+  if (existsSync(skillsSrcDir)) {
+    const claudeSkillsDir = join(homedir(), ".claude", "skills");
+    if (!existsSync(claudeSkillsDir)) {
+      mkdirSync(claudeSkillsDir, { recursive: true });
     }
-    copyFileSync(skillSrcPath, join(skillDir, "SKILL.md"));
-    console.log(`  /vibe skill installed to ${skillDir}`);
+    const installedSkills: string[] = [];
+    for (const entry of readdirSync(skillsSrcDir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const skillSrcPath = join(skillsSrcDir, entry.name, "SKILL.md");
+      if (!existsSync(skillSrcPath)) continue;
+      const skillDir = join(claudeSkillsDir, entry.name);
+      if (!existsSync(skillDir)) {
+        mkdirSync(skillDir, { recursive: true });
+      }
+      copyFileSync(skillSrcPath, join(skillDir, "SKILL.md"));
+      installedSkills.push(entry.name);
+    }
+    if (installedSkills.length > 0) {
+      console.log(`  Installed skills: ${installedSkills.join(", ")}`);
+    }
   }
 
   // ── 8. Patch Claude Code settings ──
@@ -264,8 +332,94 @@ async function main(): Promise<void> {
   rl.close();
 }
 
+async function runLocalBackendSetup(
+  config: ReturnType<typeof loadConfig>
+): Promise<boolean> {
+  console.log("  ── Local backend ──\n");
+
+  // Hardware sniff so the user knows what to expect *before* committing to
+  // the install. We can't import torch from JS, so we just check OS + GPU.
+  const os = platform();
+  let hwSummary: string;
+  if (os === "darwin") {
+    hwSummary = "macOS detected — will use MPS (Apple Silicon GPU) if available.";
+  } else if (os === "linux" || os === "win32") {
+    const smi = spawnSync("nvidia-smi", ["-L"], { stdio: "pipe" });
+    const hasGpu =
+      smi.status === 0 && /GPU \d+:/.test(smi.stdout?.toString() ?? "");
+    if (hasGpu) {
+      const firstLine =
+        smi.stdout.toString().trim().split("\n")[0] ?? "Nvidia GPU";
+      hwSummary = `Nvidia GPU detected: ${firstLine}`;
+    } else {
+      hwSummary =
+        "No Nvidia GPU detected — install will fall back to CPU torch wheels (very slow).";
+    }
+  } else {
+    hwSummary = `Unsupported platform: ${os}. Local backend may not work.`;
+  }
+  console.log(`  ${hwSummary}\n`);
+
+  // Model size — drives both download size and generation latency.
+  console.log("  Model size:");
+  console.log("    small   ~1.5 GB,  fastest, lowest quality");
+  console.log("    medium  ~3.3 GB,  good balance  ← recommended");
+  console.log("    large   ~13 GB,   highest quality, slowest, big VRAM\n");
+
+  const currentSize = config.local?.size ?? "medium";
+  const sizeAnswer = (
+    await ask(`  Size? (small/medium/large) [${currentSize}]: `)
+  ).toLowerCase();
+  let size: LocalModelSize = currentSize;
+  if (sizeAnswer === "small" || sizeAnswer === "s") size = "small";
+  else if (sizeAnswer === "medium" || sizeAnswer === "m") size = "medium";
+  else if (sizeAnswer === "large" || sizeAnswer === "l") size = "large";
+
+  console.log(`  Size: ${size}\n`);
+
+  // Confirm before kicking off a multi-GB install.
+  const proceed = (
+    await ask(
+      "  Run installer now? Downloads uv, creates a venv, installs torch + audiocraft. (Y/n): "
+    )
+  ).toLowerCase();
+  if (proceed === "n" || proceed === "no") {
+    console.log("  Skipped. Run `npm run setup:local` later to finish setup.\n");
+    return config.local !== null;
+  }
+
+  // Shell out to the install script. We use stdio:inherit so the user sees
+  // the install logs in real time — uv pip install is chatty and slow, and
+  // hiding it would feel like the setup hung.
+  const result = spawnSync(
+    process.execPath,
+    [
+      join(__dirname, "..", "scripts", "install-local.mjs"),
+      "--size",
+      size,
+    ],
+    { stdio: "inherit", cwd: join(__dirname, "..") }
+  );
+  if (result.status !== 0) {
+    console.error(
+      "\n  Local backend installer failed. Fix the error above and re-run `npm run setup:local`.\n"
+    );
+    return config.local !== null;
+  }
+
+  // The installer wrote ~/.vibe/config.json with provider=local + local block.
+  // Reload so the in-memory config sees those changes before the rest of
+  // setup overwrites the file.
+  const reloaded = loadConfig();
+  config.provider = reloaded.provider;
+  config.local = reloaded.local;
+  config.vocals = reloaded.vocals;
+  return config.local !== null;
+}
+
 function printSummary(config: ReturnType<typeof loadConfig>): void {
   console.log("  Your config:");
+  console.log(`    Backend:     ${config.provider}${config.local ? ` (${config.local.size})` : ""}`);
   console.log(`    Volume:      ${config.volume}`);
   console.log(`    Cache/mood:  ${config.cacheSizePerMood} track(s)`);
   console.log(

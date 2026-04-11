@@ -48,7 +48,12 @@ for (const file of readdirSync(hooksSrc)) {
 copyFile(join(srcDir, "status-line.mjs"), join(distDir, "status-line.mjs"), true);
 
 // 3. Skill markdown
-const skillSrc = join(srcDir, "skills", "vibe", "SKILL.md");
-if (existsSync(skillSrc)) {
-  copyFile(skillSrc, join(distDir, "skills", "vibe", "SKILL.md"));
+const skillsSrc = join(srcDir, "skills");
+if (existsSync(skillsSrc)) {
+  for (const entry of readdirSync(skillsSrc, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const skillSrc = join(skillsSrc, entry.name, "SKILL.md");
+    if (!existsSync(skillSrc)) continue;
+    copyFile(skillSrc, join(distDir, "skills", entry.name, "SKILL.md"));
+  }
 }

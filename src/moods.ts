@@ -96,7 +96,7 @@ export const MOOD_TRANSITIONS: Record<Mood, Mood[]> = {
 /**
  * Build a full music prompt by combining mood vibe + genre selection + vocal preference.
  * An optional genreHint is prepended to the genre portion to steer generation (e.g. "more metal").
- * Lyrics (when vocals is on) are attached by the ElevenLabs client, not here.
+ * Lyrics (when vocals is on) are attached by the generator, not here.
  */
 export function buildMusicPrompt(
   mood: Mood,

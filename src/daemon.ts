@@ -5,7 +5,6 @@ import type { AddressInfo } from "node:net";
 import {
   loadConfig,
   saveConfig,
-  getElevenLabsApiKey,
 } from "./config.js";
 import type { Mood } from "./moods.js";
 import { CLASSIFIABLE_MOODS } from "./moods.js";
@@ -19,7 +18,7 @@ import {
   getState,
   isDaemonRunning,
 } from "./state.js";
-import { initElevenLabs } from "./elevenlabs.js";
+import { createGenerator } from "./generators/index.js";
 import {
   initClassifier,
   pushEvent as pushClassifierEvent,
@@ -46,19 +45,24 @@ if (await isDaemonRunning()) {
   process.exit(0);
 }
 
-// ── Initialize APIs ──
-const elevenLabsKey = getElevenLabsApiKey(config);
-const missingKey = !elevenLabsKey;
-if (missingKey) {
-  // The daemon is spawned detached from the SessionStart hook, so
-  // console.error is invisible. Instead of exiting, keep the daemon alive
-  // in a degraded state and surface the error through state.json — the
-  // status line reads it and shows "⚠ vibe: <message>" in Claude Code
-  // (but only while daemonAlive, so we have to stay up).
-  console.error("No ElevenLabs API key. Run: npm run setup");
-} else {
-  initElevenLabs(elevenLabsKey!);
+// ── Initialize generator ──
+// createGenerator handles provider selection and credential validation.
+// If the real generator can't be built (e.g. missing API key) it returns
+// a StubGenerator and a non-null degradedReason — the daemon stays alive
+// and surfaces the reason via state.error so the status line can show it.
+const { generator, degradedReason } = await createGenerator(config);
+if (degradedReason) {
+  console.error(degradedReason);
 }
+
+// Warm the generator in the background so daemon startup stays fast. Local
+// MusicGen load can take 30-120s; generation calls will await the same init
+// promise if they arrive before warmup completes.
+void generator.init().catch((err) => {
+  const message = err instanceof Error ? err.message : String(err);
+  console.error(message);
+  updateState({ error: message });
+});
 
 initClassifier();
 
@@ -71,6 +75,7 @@ const playlist = new Playlist({
   genreHint: config.genreHint,
   cacheSizePerMood: config.cacheSizePerMood,
   cacheOnlyMode: config.cacheOnlyMode,
+  generator,
 });
 
 // Note: config-derived state fields (vocals, genreHint) are written in the
@@ -271,6 +276,12 @@ function handleControl(body: Record<string, unknown>): { ok: boolean; error?: st
       return { ok: true };
     case "setVocals": {
       const enabled = Boolean(body.enabled);
+      if (config.provider === "local" && enabled) {
+        return {
+          ok: false,
+          error: "local backend is instrumental-only; vocals are unavailable",
+        };
+      }
       playlist.setVocals(enabled);
       config.vocals = enabled;
       saveConfig(config);
@@ -387,6 +398,10 @@ const server = createServer(async (req, res) => {
 function shutdown(): void {
   console.log("Vibe daemon shutting down...");
   playlist.stop();
+  // Fire-and-forget — local backend's shutdown sends SIGTERM to the worker.
+  // We don't await it because process.exit happens immediately after; the
+  // worker handles its own SIGTERM cleanly via its signal handler.
+  generator.shutdown().catch(() => {});
   resetState();
   removePidFile();
   removePortFile();
@@ -405,10 +420,8 @@ updateState({
   vocals: config.vocals,
   genreHint: config.genreHint,
 });
-if (missingKey) {
-  updateState({
-    error: "No ElevenLabs API key. Run `npm run setup` or set ELEVENLABS_API_KEY.",
-  });
+if (degradedReason) {
+  updateState({ error: degradedReason });
 }
 
 // Audio backend check. On Linux without ffmpeg this is where we notice —
@@ -428,10 +441,10 @@ server.listen(0, "127.0.0.1", () => {
   console.log(`Vibe daemon listening on http://127.0.0.1:${port}`);
   console.log(`PID: ${process.pid}`);
 
-  // Welcome music — skip when we have no API key or no audio backend; the
-  // daemon stays up in degraded mode just to keep the status line error
-  // visible.
-  if (!missingKey && !backendError) {
+  // Welcome music — skip when the generator is degraded or there's no
+  // audio backend; the daemon stays up in degraded mode just to keep the
+  // status line error visible.
+  if (!degradedReason && !backendError) {
     playlist.switchMood("welcome", null).catch((err) => {
       console.error("Welcome music failed:", err);
     });

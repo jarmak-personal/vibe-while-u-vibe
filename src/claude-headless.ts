@@ -6,8 +6,8 @@ import { spawn } from "node:child_process";
 // prompt was provided.
 //
 // This lives in its own file so smoke tests can swap it for a mock
-// implementation at the compiled-dist layer, same trick we use for
-// elevenlabs.js in scripts/smoke-wiring.mjs.
+// implementation at the compiled-dist layer. (The music generator is
+// mocked via dependency injection instead — see scripts/smoke-ci.mjs.)
 export function claudeHeadless(
   prompt: string,
   systemPrompt: string,

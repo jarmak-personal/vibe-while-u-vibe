@@ -1,62 +1,39 @@
 #!/usr/bin/env node
 // End-to-end wiring smoke test: verifies that the lyrics string produced by
-// classifyVibe reaches elevenlabs.generateTrack unchanged when routed through
-// Playlist.switchMood. Runs with dist/elevenlabs.js temporarily replaced by a
-// mock that captures the GenerateOptions it receives. Restores the original
-// in a finally block.
+// classifyVibe reaches generator.generateTrack unchanged when routed through
+// Playlist.switchMood. The generator is mocked via dependency injection (no
+// module swap) — we construct a fake MusicGenerator inline and hand it to the
+// Playlist constructor.
 //
 // LOCAL-ONLY. classifyVibe shells out to the `claude` CLI, which isn't
 // available in CI. Run with `npm run test:smoke`.
 
-import {
-  copyFileSync,
-  existsSync,
-  readFileSync,
-  renameSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DIST = resolve(__dirname, "..", "dist");
-const REAL = join(DIST, "elevenlabs.js");
-const BACKUP = join(DIST, "elevenlabs.js.bak");
-const CAPTURE = join(DIST, "mock-capture.json");
 const FAKE_MP3 = join(DIST, "mock-track.mp3");
 
 if (!existsSync(FAKE_MP3)) writeFileSync(FAKE_MP3, Buffer.from([0xff, 0xfb, 0x90, 0x00]));
-const fakeMp3Escaped = FAKE_MP3.replaceAll("\\", "\\\\");
-const captureEscaped = CAPTURE.replaceAll("\\", "\\\\");
-
-const MOCK_SRC = `
-// Auto-generated mock. Captures generateTrack calls to a JSON file.
-import { writeFileSync, readFileSync } from "node:fs";
-
-export class QuotaExceededError extends Error {
-  constructor(message) { super(message); this.name = "QuotaExceededError"; }
-}
-export function initElevenLabs(_apiKey) {}
-export function getCachedTracks(_mood) { return []; }
-export async function generateTrack(opts) {
-  let prev = [];
-  try { prev = JSON.parse(readFileSync(${JSON.stringify(captureEscaped)}, "utf-8")); } catch {}
-  prev.push({ at: Date.now(), opts });
-  writeFileSync(${JSON.stringify(captureEscaped)}, JSON.stringify(prev, null, 2));
-  return ${JSON.stringify(fakeMp3Escaped)};
-}
-`;
-
-// Swap
-if (!existsSync(BACKUP)) copyFileSync(REAL, BACKUP);
-writeFileSync(REAL, MOCK_SRC);
-writeFileSync(CAPTURE, "[]");
 
 try {
   const { initClassifier, pushEvent, setSessionCwd, classifyVibe } =
     await import("../dist/vibe-classifier.js");
   const { Playlist } = await import("../dist/playlist.js");
+
+  // In-memory mock generator. Captures every generateTrack call.
+  const captured = [];
+  const mockGenerator = {
+    name: "mock",
+    async init() {},
+    async shutdown() {},
+    async generateTrack(opts) {
+      captured.push({ at: Date.now(), opts });
+      return FAKE_MP3;
+    },
+  };
 
   initClassifier();
   const sessionId = "wiring-smoke";
@@ -90,6 +67,7 @@ try {
     genreHint: null,
     cacheSizePerMood: 3,
     cacheOnlyMode: false,
+    generator: mockGenerator,
   });
 
   // immediate=true forces preparePending to run now instead of deferred.
@@ -100,7 +78,6 @@ try {
   // just in case something in the chain is microtask-deferred.
   await new Promise((r) => setImmediate(r));
 
-  const captured = JSON.parse(readFileSync(CAPTURE, "utf-8"));
   if (captured.length === 0) {
     console.log("\n❌ generateTrack was NEVER called");
     process.exitCode = 1;
@@ -126,10 +103,5 @@ try {
 
   playlist.stop();
 } finally {
-  if (existsSync(BACKUP)) {
-    renameSync(BACKUP, REAL);
-  }
-  rmSync(CAPTURE, { force: true });
   rmSync(FAKE_MP3, { force: true });
-  console.log("(restored dist/elevenlabs.js)");
 }

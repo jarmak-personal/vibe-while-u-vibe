@@ -143,11 +143,18 @@ async function main(): Promise<void> {
     }
   }
 
-  // 4. Remove ~/.claude/skills/vibe
-  const skillDir = join(homedir(), ".claude", "skills", "vibe");
-  if (existsSync(skillDir)) {
+  // 4. Remove installed vibe skills
+  const skillRoot = join(homedir(), ".claude", "skills");
+  const skillNames = ["vibe", "vibe-local", "vibe-elevenlabs"];
+  const removedSkills: string[] = [];
+  for (const name of skillNames) {
+    const skillDir = join(skillRoot, name);
+    if (!existsSync(skillDir)) continue;
     rmSync(skillDir, { recursive: true, force: true });
-    console.log("  Removed ~/.claude/skills/vibe");
+    removedSkills.push(name);
+  }
+  if (removedSkills.length > 0) {
+    console.log(`  Removed skills: ${removedSkills.join(", ")}`);
   }
 
   console.log("\n  Uninstalled. Your Claude Code sessions will no longer play music.\n");

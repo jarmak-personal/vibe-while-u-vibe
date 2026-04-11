@@ -1,18 +1,19 @@
 #!/usr/bin/env node
-// CI-safe smoke test: verifies the full classifier → playlist → generateTrack
-// wiring without needing the `claude` CLI or the ElevenLabs API. Both
-// dist/claude-headless.js and dist/elevenlabs.js are temporarily swapped
-// for mocks that return canned values and record calls. Originals restored
-// in the finally block.
+// CI-safe smoke test: verifies the full classifier → playlist → generator
+// wiring without needing the `claude` CLI or the ElevenLabs API.
+//
+// The classifier is mocked by module-swapping dist/claude-headless.js (there's
+// no injection seam for it). The generator is mocked via dependency injection
+// — we build a MusicGenerator object inline and pass it into new Playlist.
 //
 // The point: catch regressions where the lyrics/mood string stops threading
-// cleanly through Playlist.switchMood → generateTrack, even if nobody on the
-// team can run the live smoke tests locally. Runs in GitHub Actions.
+// cleanly through Playlist.switchMood → generator.generateTrack, even if
+// nobody on the team can run the live smoke tests locally. Runs in GitHub
+// Actions.
 
 import {
   copyFileSync,
   existsSync,
-  readFileSync,
   renameSync,
   rmSync,
   writeFileSync,
@@ -23,12 +24,8 @@ import { dirname, join, resolve } from "node:path";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DIST = resolve(__dirname, "..", "dist");
 
-const EL_REAL = join(DIST, "elevenlabs.js");
-const EL_BACKUP = join(DIST, "elevenlabs.js.bak");
 const CH_REAL = join(DIST, "claude-headless.js");
 const CH_BACKUP = join(DIST, "claude-headless.js.bak");
-
-const CAPTURE = join(DIST, "mock-capture.json");
 const FAKE_MP3 = join(DIST, "mock-track.mp3");
 
 const CANNED_MOOD = "focus";
@@ -43,24 +40,6 @@ ci chorus line
 canned outro`;
 
 if (!existsSync(FAKE_MP3)) writeFileSync(FAKE_MP3, Buffer.from([0xff, 0xfb, 0x90, 0x00]));
-const fakeMp3Escaped = FAKE_MP3.replaceAll("\\", "\\\\");
-const captureEscaped = CAPTURE.replaceAll("\\", "\\\\");
-
-const EL_MOCK_SRC = `
-import { writeFileSync, readFileSync } from "node:fs";
-export class QuotaExceededError extends Error {
-  constructor(message) { super(message); this.name = "QuotaExceededError"; }
-}
-export function initElevenLabs(_apiKey) {}
-export function getCachedTracks(_mood) { return []; }
-export async function generateTrack(opts) {
-  let prev = [];
-  try { prev = JSON.parse(readFileSync(${JSON.stringify(captureEscaped)}, "utf-8")); } catch {}
-  prev.push({ at: Date.now(), opts });
-  writeFileSync(${JSON.stringify(captureEscaped)}, JSON.stringify(prev, null, 2));
-  return ${JSON.stringify(fakeMp3Escaped)};
-}
-`;
 
 const CH_MOCK_SRC = `
 // Mock: short-circuits claude --print. Returns mood on the first call
@@ -83,13 +62,24 @@ function restore(real, backup) {
 
 let exitCode = 0;
 try {
-  swap(EL_REAL, EL_BACKUP, EL_MOCK_SRC);
   swap(CH_REAL, CH_BACKUP, CH_MOCK_SRC);
-  writeFileSync(CAPTURE, "[]");
 
   const { initClassifier, pushEvent, setSessionCwd, classifyVibe } =
     await import("../dist/vibe-classifier.js");
   const { Playlist } = await import("../dist/playlist.js");
+
+  // In-memory mock generator. Captures every generateTrack call so we can
+  // assert the mood/lyrics/instrumental flags threaded through cleanly.
+  const captured = [];
+  const mockGenerator = {
+    name: "mock",
+    async init() {},
+    async shutdown() {},
+    async generateTrack(opts) {
+      captured.push({ at: Date.now(), opts });
+      return FAKE_MP3;
+    },
+  };
 
   initClassifier();
   const sessionId = "smoke-ci-session";
@@ -130,14 +120,14 @@ try {
     genreHint: null,
     cacheSizePerMood: 3,
     cacheOnlyMode: false,
+    generator: mockGenerator,
   });
 
   await playlist.switchMood(result.mood, result.lyrics, true);
   await new Promise((r) => setImmediate(r));
 
-  const captured = JSON.parse(readFileSync(CAPTURE, "utf-8"));
   if (captured.length === 0) {
-    console.log("❌ generateTrack was never called");
+    console.log("❌ generator.generateTrack was never called");
     exitCode = 1;
   } else {
     const call = captured[captured.length - 1];
@@ -158,12 +148,10 @@ try {
   playlist.stop();
 
   if (exitCode === 0) {
-    console.log("✅ smoke-ci: classifier → playlist → generateTrack wiring intact");
+    console.log("✅ smoke-ci: classifier → playlist → generator wiring intact");
   }
 } finally {
-  restore(EL_REAL, EL_BACKUP);
   restore(CH_REAL, CH_BACKUP);
-  rmSync(CAPTURE, { force: true });
   rmSync(FAKE_MP3, { force: true });
 }
 

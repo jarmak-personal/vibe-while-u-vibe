@@ -23,7 +23,6 @@ const PORT_FILE = join(VIBE_DIR, "daemon.port");
 const LOG_FILE = join(VIBE_DIR, "daemon.log");
 const PINNED_PATH_FILE = join(VIBE_DIR, "daemon-path");
 const STATE_FILE = join(VIBE_DIR, "state.json");
-const SKILL_DEST = join(homedir(), ".claude", "skills", "vibe", "SKILL.md");
 const DISABLED_FILE = join(VIBE_DIR, "disabled");
 
 if (!existsSync(VIBE_DIR)) {
@@ -74,22 +73,32 @@ if (!daemonScript) {
   process.exit(1);
 }
 
-// ── Re-sync /vibe skill from dist/ if a newer version exists ─────────────
-// The skill markdown is copied to ~/.claude/skills/vibe/SKILL.md at setup
-// time. On updates, rerunning setup isn't ergonomic, so we copy it here
-// whenever the source is newer than the destination.
-function resyncSkill() {
+// ── Re-sync bundled skills from dist/ if newer versions exist ────────────
+// Skills are copied to ~/.claude/skills/<name>/SKILL.md at setup time. On
+// updates, rerunning setup isn't ergonomic, so we refresh any newer files
+// on SessionStart.
+function resyncSkills() {
   try {
-    const skillSrc = resolve(dirname(daemonScript), "skills", "vibe", "SKILL.md");
-    if (!existsSync(skillSrc)) return;
-    const skillDestDir = dirname(SKILL_DEST);
-    if (!existsSync(skillDestDir)) {
-      mkdirSync(skillDestDir, { recursive: true });
+    const skillsSrcDir = resolve(dirname(daemonScript), "skills");
+    if (!existsSync(skillsSrcDir)) return;
+    const claudeSkillsDir = join(homedir(), ".claude", "skills");
+    if (!existsSync(claudeSkillsDir)) {
+      mkdirSync(claudeSkillsDir, { recursive: true });
     }
-    const srcMtime = statSync(skillSrc).mtimeMs;
-    const destMtime = existsSync(SKILL_DEST) ? statSync(SKILL_DEST).mtimeMs : 0;
-    if (srcMtime > destMtime) {
-      copyFileSync(skillSrc, SKILL_DEST);
+    for (const entry of readdirSync(skillsSrcDir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const skillSrc = join(skillsSrcDir, entry.name, "SKILL.md");
+      if (!existsSync(skillSrc)) continue;
+      const skillDestDir = join(claudeSkillsDir, entry.name);
+      const skillDest = join(skillDestDir, "SKILL.md");
+      if (!existsSync(skillDestDir)) {
+        mkdirSync(skillDestDir, { recursive: true });
+      }
+      const srcMtime = statSync(skillSrc).mtimeMs;
+      const destMtime = existsSync(skillDest) ? statSync(skillDest).mtimeMs : 0;
+      if (srcMtime > destMtime) {
+        copyFileSync(skillSrc, skillDest);
+      }
     }
   } catch {
     // Best effort — resync failures shouldn't block session start.
@@ -197,7 +206,7 @@ function killAndWait(pid, timeoutMs = 3000) {
 }
 
 // Skill resync runs on every SessionStart regardless of daemon state.
-resyncSkill();
+resyncSkills();
 
 // ── Handle existing daemon ────────────────────────────────────────────────
 // Use the /health probe (not just pid-file presence) so a recycled PID
