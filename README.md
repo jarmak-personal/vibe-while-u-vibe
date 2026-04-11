@@ -240,10 +240,13 @@ curl http://127.0.0.1:$PORT/status
     UserPromptSubmit -> send-event     daemon.log       (daemon output)
     Stop             -> send-event     hooks/           (installed hook scripts)
   statusLine:                          cache/
-    -> status-line.mjs                   focus/         (cached mp3s by mood)
-                                         debug/
-                                         explore/
-                                         ...
+    -> status-line.mjs                   instrumental/  (rotated cache, both backends)
+                                           focus/*.mp3
+                                           debug/*.mp3
+                                           ...
+                                         vocals/        (one-shot, ElevenLabs only,
+                                           focus/*.mp3   never rotated)
+                                           ...
                                        skill-guidance/  (backend rules the
                                          local.md       `vibe` skill reads
                                          elevenlabs.md  on demand)
@@ -271,7 +274,6 @@ SessionEnd event, and the daemon shuts itself down once its last session ends.
   "provider": "elevenlabs",
   "elevenLabsApiKey": "sk-...",
   "volume": 0.3,
-  "port": 7773,
   "enabled": true,
   "excludedGenres": ["metal", "country"],
   "interestingVibes": false,
@@ -279,6 +281,8 @@ SessionEnd event, and the daemon shuts itself down once its last session ends.
   "local": null
 }
 ```
+
+The daemon binds to a random loopback port at startup and writes the bound port to `~/.vibe/daemon.port` — the hooks and the `vibe` skill read it from there.
 
 In local mode, the `local` block is populated and `provider` flips:
 
