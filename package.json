@@ -1,0 +1,54 @@
+{
+  "name": "vibe-while-u-vibe",
+  "version": "0.1.0",
+  "description": "Claude Code extension that generates thematic AI music during coding sessions",
+  "type": "module",
+  "main": "dist/daemon.js",
+  "bin": {
+    "vibe": "dist/setup.js",
+    "vibe-daemon": "dist/daemon.js",
+    "vibe-uninstall": "dist/uninstall.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc && node scripts/copy-assets.mjs",
+    "dev": "tsc --watch",
+    "start": "node dist/daemon.js",
+    "setup": "node dist/setup.js",
+    "uninstall": "node dist/uninstall.js",
+    "test:smoke": "npm run build && node scripts/smoke-headless.mjs && node scripts/smoke-wiring.mjs",
+    "test:ci": "node scripts/smoke-ci.mjs",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "claude-code",
+    "music",
+    "ai",
+    "elevenlabs",
+    "vibe"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jarmak-personal/vibe-while-u-vibe.git"
+  },
+  "bugs": {
+    "url": "https://github.com/jarmak-personal/vibe-while-u-vibe/issues"
+  },
+  "homepage": "https://github.com/jarmak-personal/vibe-while-u-vibe#readme",
+  "author": "vibe-while-u-vibe devs",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@elevenlabs/elevenlabs-js": "^2.42.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  }
+}

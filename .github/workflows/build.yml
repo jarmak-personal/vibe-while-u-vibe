@@ -1,0 +1,35 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+        node: [18, 20, 22]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Install ffmpeg (Linux only)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - run: npm ci
+      - run: npm run build
+
+      - name: Smoke-test player backend detection
+        run: node -e "import('./dist/player.js').then(({Player}) => { const p = new Player(0.3); console.log('player backend ok on ${{ matrix.os }}'); })"
+
+      - name: Smoke-test classifier → playlist wiring (mocked)
+        run: npm run test:ci
