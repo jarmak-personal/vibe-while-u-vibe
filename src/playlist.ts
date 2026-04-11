@@ -5,7 +5,13 @@ import {
   QuotaExceededError,
   GeneratorUnavailableError,
 } from "./generators/types.js";
-import { MOOD_DEFINITIONS, MOOD_TRANSITIONS, buildMusicPrompt, type Mood } from "./moods.js";
+import {
+  MOOD_DEFINITIONS,
+  MOOD_TRANSITIONS,
+  buildLocalMusicPrompt,
+  buildMusicPrompt,
+  type Mood,
+} from "./moods.js";
 import { updateState } from "./state.js";
 
 export interface PlaylistOptions {
@@ -76,6 +82,24 @@ export class Playlist {
   /** Returns a user-visible error if no audio backend is available. */
   getBackendError(): string | null {
     return this.player.getBackendError();
+  }
+
+  private buildPrompt(mood: Mood, vocals: boolean): string {
+    if (this.generator.promptStyle === "musicgen") {
+      return buildLocalMusicPrompt(
+        mood,
+        this.effectiveExcludedGenres(),
+        this.opts.interestingVibes,
+        this.effectiveGenreHint()
+      );
+    }
+    return buildMusicPrompt(
+      mood,
+      this.effectiveExcludedGenres(),
+      this.opts.interestingVibes,
+      vocals,
+      this.effectiveGenreHint()
+    );
   }
 
   private async withGenLock<T>(fn: () => Promise<T>): Promise<T> {
@@ -280,13 +304,7 @@ export class Playlist {
     updateState({ generating: true });
     try {
       const isInstrumental = !this.opts.vocals || mood === "welcome";
-      const prompt = buildMusicPrompt(
-        mood,
-        this.effectiveExcludedGenres(),
-        this.opts.interestingVibes,
-        !isInstrumental,
-        this.effectiveGenreHint()
-      );
+      const prompt = this.buildPrompt(mood, !isInstrumental);
       const result = await this.withGenLock(async () => {
         // Re-check cache inside the lock — a parallel prefetch may have
         // filled it up to the cap while we were waiting our turn.
@@ -414,13 +432,7 @@ export class Playlist {
 
       try {
         const isInstrumental = !this.opts.vocals || mood === "welcome";
-        const prompt = buildMusicPrompt(
-          mood,
-          this.effectiveExcludedGenres(),
-          this.opts.interestingVibes,
-          !isInstrumental,
-          this.effectiveGenreHint()
-        );
+        const prompt = this.buildPrompt(mood, !isInstrumental);
         const result = await this.withGenLock(async () => {
           if (useCache) {
             const freshCache = getCachedTracks(mood);
@@ -536,13 +548,21 @@ export class Playlist {
     if (!target) return;
 
     try {
-      const prompt = buildMusicPrompt(
-        target,
-        this.opts.excludedGenres,
-        this.opts.interestingVibes,
-        false,
-        this.opts.genreHint
-      );
+      const prompt =
+        this.generator.promptStyle === "musicgen"
+          ? buildLocalMusicPrompt(
+              target,
+              this.opts.excludedGenres,
+              this.opts.interestingVibes,
+              this.opts.genreHint
+            )
+          : buildMusicPrompt(
+              target,
+              this.opts.excludedGenres,
+              this.opts.interestingVibes,
+              false,
+              this.opts.genreHint
+            );
       await this.withGenLock(async () => {
         // Re-check inside the lock — another generation may have landed
         // in this mood's cache while we were waiting our turn. Must match

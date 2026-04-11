@@ -14,6 +14,7 @@ import {
 
 export class ElevenLabsGenerator implements MusicGenerator {
   readonly name = "elevenlabs";
+  readonly promptStyle = "default" as const;
   private client: ElevenLabsClient;
 
   constructor(apiKey: string) {

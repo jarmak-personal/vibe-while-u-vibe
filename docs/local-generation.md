@@ -331,20 +331,29 @@ entirely in that case.
 
 ## Prompt tuning
 
-MusicGen prompts behave differently from ElevenLabs prompts — tighter on
-genre/instrumentation/tempo, looser on narrative mood descriptors. The
-current `src/moods.ts` prompts are written for ElevenLabs.
+MusicGen prompts behave differently from ElevenLabs prompts. Meta's examples
+and model cards lean toward short natural-language descriptions with clear
+genre, instrumentation, groove, and energy cues, rather than tag soup or
+long narrative instructions.
 
-Plan: **try the existing prompts first, don't add an override layer until we
-see quality issues.** The `vibeDescriptor` strings in `MOOD_DEFINITIONS` are
-actually pretty music-friendly already (e.g. "driving beat, determination...
-dark and intense"). The `buildMusicPrompt` function also adds genre + "with
-vocals"/"instrumental only" suffix — for local, we always pass instrumental,
-which is the right signal anyway.
+Shipped direction:
+- ElevenLabs keeps the original shared prompt builder.
+- Local generation uses its own builder in `src/moods.ts`.
+- That builder should be treated as a **starting point that teaches the
+  shape of a good MusicGen prompt**, not as a fixed template to preserve
+  word-for-word.
+
+When iterating on local prompts:
+- Preserve the high-level structure: concise natural language, explicit
+  instrumental framing, concrete genre/instrument/rhythm cues.
+- Feel free to change wording, add more variation, or improve steering if
+  listening tests suggest better phrasing.
+- Do **not** cargo-cult the exact current strings just because they exist in
+  code today.
 
 If a round of listening tests shows MusicGen is floundering on a specific
-mood, add an optional `localPrompt` field to `MoodDefinition` in a follow-up.
-Don't over-engineer upfront.
+mood or genre family, evolve the local builder directly rather than trying
+to keep it textually aligned with ElevenLabs prompts.
 
 ## File change list
 

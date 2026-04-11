@@ -34,6 +34,7 @@ const HEALTH_READY_TIMEOUT_MS = 5_000;
  */
 export class LocalGenerator implements MusicGenerator {
   readonly name = "local-musicgen";
+  readonly promptStyle = "musicgen" as const;
   private proc: ChildProcess | null = null;
   private readyPromise: Promise<void> | null = null;
   private readonly token: string;

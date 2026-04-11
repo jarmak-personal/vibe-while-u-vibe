@@ -50,6 +50,7 @@ export async function createGenerator(config: VibeConfig): Promise<GeneratorResu
  */
 export class StubGenerator implements MusicGenerator {
   readonly name = "stub";
+  readonly promptStyle = "default" as const;
   constructor(private readonly reason: string) {}
   async init(): Promise<void> {}
   async shutdown(): Promise<void> {}
