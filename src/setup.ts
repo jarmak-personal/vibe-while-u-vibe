@@ -341,16 +341,30 @@ async function runLocalBackendSetup(
   // the install. We can't import torch from JS, so we just check OS + GPU.
   const os = platform();
   let hwSummary: string;
+  let nvidiaDetected = false;
+  let driverCudaHint: string | null = null; // e.g. "12.4" — just a display hint
   if (os === "darwin") {
     hwSummary = "macOS detected — will use MPS (Apple Silicon GPU) if available.";
   } else if (os === "linux" || os === "win32") {
-    const smi = spawnSync("nvidia-smi", ["-L"], { stdio: "pipe" });
+    // `nvidia-smi -L` lists GPUs; the full output (no -L) includes a header
+    // line with "CUDA Version: X.Y" — that's the max CUDA the driver
+    // supports, NOT the toolkit the user has installed. We show it as a hint
+    // and still prompt the user for their actual CTK version below.
+    const smiList = spawnSync("nvidia-smi", ["-L"], { stdio: "pipe" });
     const hasGpu =
-      smi.status === 0 && /GPU \d+:/.test(smi.stdout?.toString() ?? "");
+      smiList.status === 0 &&
+      /GPU \d+:/.test(smiList.stdout?.toString() ?? "");
     if (hasGpu) {
+      nvidiaDetected = true;
       const firstLine =
-        smi.stdout.toString().trim().split("\n")[0] ?? "Nvidia GPU";
-      hwSummary = `Nvidia GPU detected: ${firstLine}`;
+        smiList.stdout.toString().trim().split("\n")[0] ?? "Nvidia GPU";
+      const smiHeader = spawnSync("nvidia-smi", [], { stdio: "pipe" });
+      const headerOut = smiHeader.stdout?.toString() ?? "";
+      const m = headerOut.match(/CUDA Version:\s*(\d+\.\d+)/);
+      driverCudaHint = m ? m[1] : null;
+      hwSummary = driverCudaHint
+        ? `Nvidia GPU detected: ${firstLine} (driver supports CUDA ≤ ${driverCudaHint})`
+        : `Nvidia GPU detected: ${firstLine}`;
     } else {
       hwSummary =
         "No Nvidia GPU detected — install will fall back to CPU torch wheels (very slow).";
@@ -377,6 +391,39 @@ async function runLocalBackendSetup(
 
   console.log(`  Size: ${size}\n`);
 
+  // CUDA toolkit version — only when we're on Linux/Windows with an Nvidia
+  // GPU. We ask the user rather than auto-detecting because `nvidia-smi`
+  // reports the *driver's max supported CUDA*, not the CTK the user has
+  // installed. Blank input → default PyTorch build (no --index-url), which
+  // currently bundles CUDA 12.x and is forward-compat with CUDA 13 drivers.
+  let cudaArg: string | null = null;
+  if (nvidiaDetected) {
+    console.log("  CUDA toolkit:");
+    console.log("    PyTorch's default PyPI wheel bundles a recent CUDA 12.x");
+    console.log("    runtime and works on any system with a CUDA 12+ driver.");
+    console.log("    Only pin a version if you specifically need a CTK match");
+    console.log("    (e.g. building custom extensions).");
+    if (driverCudaHint) {
+      console.log(`    Your driver's max CUDA: ${driverCudaHint}`);
+    }
+    console.log("    Examples: 12.4, 12.6, 12.8, 13.0\n");
+    const cudaAnswer = (
+      await ask("  CUDA toolkit version (blank = PyTorch default): ")
+    ).trim();
+    if (cudaAnswer) {
+      if (!/^\d+\.\d+$/.test(cudaAnswer)) {
+        console.log(
+          `  Couldn't parse "${cudaAnswer}" as major.minor — using PyTorch default instead.`
+        );
+      } else {
+        cudaArg = cudaAnswer;
+      }
+    }
+    console.log(
+      `  CUDA: ${cudaArg ?? "PyTorch default (cu12.x from PyPI)"}\n`
+    );
+  }
+
   // Confirm before kicking off a multi-GB install.
   const proceed = (
     await ask(
@@ -391,15 +438,18 @@ async function runLocalBackendSetup(
   // Shell out to the install script. We use stdio:inherit so the user sees
   // the install logs in real time — uv pip install is chatty and slow, and
   // hiding it would feel like the setup hung.
-  const result = spawnSync(
-    process.execPath,
-    [
-      join(__dirname, "..", "scripts", "install-local.mjs"),
-      "--size",
-      size,
-    ],
-    { stdio: "inherit", cwd: join(__dirname, "..") }
-  );
+  const installArgs = [
+    join(__dirname, "..", "scripts", "install-local.mjs"),
+    "--size",
+    size,
+  ];
+  if (cudaArg) {
+    installArgs.push("--cuda", cudaArg);
+  }
+  const result = spawnSync(process.execPath, installArgs, {
+    stdio: "inherit",
+    cwd: join(__dirname, ".."),
+  });
   if (result.status !== 0) {
     console.error(
       "\n  Local backend installer failed. Fix the error above and re-run `npm run setup:local`.\n"

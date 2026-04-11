@@ -32,7 +32,10 @@ Local setup (`npm run setup:local`):
 2. Creates a Python 3.11 venv at `~/.vibe/venv`.
 3. Installs torch + torchaudio from the right wheel index:
    - macOS → default PyPI (MPS support is in the standard wheel)
-   - Linux/Windows + Nvidia → `https://download.pytorch.org/whl/cu121`
+   - Linux/Windows + Nvidia → default PyPI by default (bundles a recent
+     CUDA 12.x runtime, forward-compat with CUDA 13 drivers). Users can
+     pin a specific CTK with `--cuda 12.4` etc., which routes to the
+     matching `cu{major}{minor}` wheel index.
    - Linux/Windows, no GPU → `https://download.pytorch.org/whl/cpu`
 4. Installs `audiocraft==1.3.0` from `python/requirements.txt`.
 5. Writes `provider="local"` and the `local` config block (pythonPath,

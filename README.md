@@ -131,7 +131,7 @@ npm run setup:local  # just bootstraps the local backend
 2. Create a Python 3.11 venv at `~/.vibe/venv`.
 3. Install `torch` + `torchaudio` from the right wheel index for your system:
    - **macOS** (any Mac, including Apple Silicon) → default PyPI; MPS support is in the standard wheel.
-   - **Linux/Windows + Nvidia GPU** → CUDA 12.1 wheels.
+   - **Linux/Windows + Nvidia GPU** → default PyPI, which bundles a recent CUDA 12.x runtime and works on any CUDA 12+ driver (including CUDA 13 via forward-compat). If you want to pin a specific toolkit version (e.g. because you're building custom extensions against your local CTK), the setup CLI prompts you for a CUDA `major.minor` and passes it through as `--cuda 12.4` → `cu124` wheel index, etc.
    - **Linux/Windows, no GPU** → CPU wheels (with a loud warning — generation will be too slow for real use).
 4. Install `audiocraft==1.3.0`.
 5. Write a `local` config block into `~/.vibe/config.json` with `provider="local"`.

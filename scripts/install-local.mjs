@@ -22,6 +22,11 @@
  *
  * Args: --size <small|medium|large>  default: medium
  *       --device <auto|mps|cuda|cpu> default: auto
+ *       --cuda <version|none>        default: unset (use PyTorch's default PyPI
+ *                                    wheel, which currently bundles CUDA 12.x).
+ *                                    Example: --cuda 12.4 → cu124 wheel index,
+ *                                    --cuda 12.8 → cu128, --cuda none → same as
+ *                                    unset (no --index-url).
  */
 
 import {
@@ -55,12 +60,16 @@ const PY_BIN = IS_WINDOWS
 const args = parseArgs(process.argv.slice(2));
 const size = args.size ?? "medium";
 const device = args.device ?? "auto";
+const cudaArg = args.cuda ?? null; // e.g. "12.4", "12.8", "none", or null
 
 if (!["small", "medium", "large"].includes(size)) {
   fail(`--size must be one of small|medium|large (got: ${size})`);
 }
 if (!["auto", "mps", "cuda", "cpu"].includes(device)) {
   fail(`--device must be one of auto|mps|cuda|cpu (got: ${device})`);
+}
+if (cudaArg !== null && cudaArg !== "none" && !/^\d+\.\d+$/.test(cudaArg)) {
+  fail(`--cuda must be "none" or a major.minor version like 12.4 (got: ${cudaArg})`);
 }
 
 main().catch((err) => {
@@ -85,12 +94,12 @@ async function main() {
   createVenv();
 
   // 3. Install torch + audiocraft
-  const torchKind = decideTorchKind();
-  installTorch(torchKind);
+  const torchPlan = decideTorchInstall();
+  installTorch(torchPlan);
   installAudiocraft();
 
   // 4. Patch config
-  patchConfig(torchKind);
+  patchConfig(torchPlan);
 
   banner("Local backend installed!");
   console.log("  Next: re-run `npm run setup` (or just start a Claude Code");
@@ -108,9 +117,10 @@ function parseArgs(argv) {
     const a = argv[i];
     if (a === "--size") out.size = argv[++i];
     else if (a === "--device") out.device = argv[++i];
+    else if (a === "--cuda") out.cuda = argv[++i];
     else if (a === "-h" || a === "--help") {
       console.log(
-        "Usage: node scripts/install-local.mjs [--size small|medium|large] [--device auto|mps|cuda|cpu]"
+        "Usage: node scripts/install-local.mjs [--size small|medium|large] [--device auto|mps|cuda|cpu] [--cuda <major.minor>|none]"
       );
       process.exit(0);
     }
@@ -192,45 +202,86 @@ function createVenv() {
   }
 }
 
-function decideTorchKind() {
-  // "kind" controls which wheel index we point pip at.
-  //   "default" → torch from PyPI (used on macOS, where MPS support ships
-  //               in the default wheel and CUDA wheels don't exist).
-  //   "cuda121" → CUDA 12.1 wheels for Linux/Windows + Nvidia.
-  //   "cpu"     → CPU-only wheels for Linux/Windows without a GPU.
-  if (platform() === "darwin") return "default";
+function decideTorchInstall() {
+  // Returns { kind, indexArgs, label } describing how to install torch.
+  //
+  //   kind = "default"     → no --index-url; pip gets whatever PyPI ships,
+  //                          which for torch on Linux/Windows currently
+  //                          bundles a recent CUDA 12.x runtime. This is
+  //                          the PyTorch-recommended path for CUDA 12.x
+  //                          users and macOS (MPS ships in the default
+  //                          wheel). Forward-compat with CUDA 13 drivers.
+  //   kind = "cuda-pinned" → --index-url cu{major}{minor} because the user
+  //                          explicitly requested a CTK-matched wheel.
+  //   kind = "cpu"         → --index-url cpu for Linux/Windows hosts with
+  //                          no Nvidia GPU, or when --device cpu is set.
+  //
+  // macOS: always default (CUDA wheels don't exist for Darwin).
+  if (platform() === "darwin") {
+    return { kind: "default", indexArgs: [], label: "default (macOS / MPS)" };
+  }
 
-  // User can force CPU.
-  if (device === "cpu") return "cpu";
+  // Explicit CPU override.
+  if (device === "cpu") {
+    return {
+      kind: "cpu",
+      indexArgs: ["--index-url", "https://download.pytorch.org/whl/cpu"],
+      label: "cpu (forced via --device cpu)",
+    };
+  }
 
   // Probe for Nvidia. nvidia-smi exits non-zero if no driver/GPU.
   const smi = spawnSync("nvidia-smi", ["-L"], { stdio: "pipe" });
-  const hasGpu = smi.status === 0 && /GPU \d+:/.test(smi.stdout?.toString() ?? "");
-  if (hasGpu) {
-    console.log(`  Detected Nvidia GPU: ${smi.stdout.toString().trim().split("\n")[0]}`);
-    return "cuda121";
+  const hasGpu =
+    smi.status === 0 && /GPU \d+:/.test(smi.stdout?.toString() ?? "");
+
+  if (!hasGpu) {
+    console.warn(
+      "  WARNING: no Nvidia GPU detected. Falling back to CPU torch wheels."
+    );
+    console.warn(
+      "  MusicGen on CPU is *very* slow (multiple minutes per 30s clip)."
+    );
+    console.warn(
+      "  Consider --device cpu only for testing the wiring, not for daily use."
+    );
+    return {
+      kind: "cpu",
+      indexArgs: ["--index-url", "https://download.pytorch.org/whl/cpu"],
+      label: "cpu (no Nvidia GPU detected)",
+    };
   }
 
-  console.warn(
-    "  WARNING: no Nvidia GPU detected. Falling back to CPU torch wheels."
+  console.log(
+    `  Detected Nvidia GPU: ${smi.stdout.toString().trim().split("\n")[0]}`
   );
-  console.warn(
-    "  MusicGen on CPU is *very* slow (multiple minutes per 30s clip)."
-  );
-  console.warn(
-    "  Consider --device cpu only for testing the wiring, not for daily use."
-  );
-  return "cpu";
+
+  // User passed --cuda <x.y>: map to cu{XY} wheel index.
+  if (cudaArg && cudaArg !== "none") {
+    const [maj, min] = cudaArg.split(".");
+    const suffix = `cu${maj}${min}`;
+    return {
+      kind: "cuda-pinned",
+      indexArgs: [
+        "--index-url",
+        `https://download.pytorch.org/whl/${suffix}`,
+      ],
+      label: `CUDA ${cudaArg} (${suffix} wheel index)`,
+    };
+  }
+
+  // Default GPU path: no --index-url. PyPI's default torch wheel bundles a
+  // recent CUDA 12.x runtime and is forward-compat with CUDA 13 drivers. We
+  // don't pin a minor version so this stays current as PyTorch rolls forward.
+  return {
+    kind: "default",
+    indexArgs: [],
+    label: "default (PyPI latest — bundles CUDA 12.x runtime)",
+  };
 }
 
-function installTorch(kind) {
-  step(`Installing torch + torchaudio (${kind})`);
-  const indexArgs =
-    kind === "cuda121"
-      ? ["--index-url", "https://download.pytorch.org/whl/cu121"]
-      : kind === "cpu"
-      ? ["--index-url", "https://download.pytorch.org/whl/cpu"]
-      : []; // default → PyPI
+function installTorch(plan) {
+  step(`Installing torch + torchaudio — ${plan.label}`);
   const r = spawnSync(
     "uv",
     [
@@ -240,7 +291,7 @@ function installTorch(kind) {
       PY_BIN,
       "torch",
       "torchaudio",
-      ...indexArgs,
+      ...plan.indexArgs,
     ],
     { stdio: "inherit" }
   );
@@ -268,7 +319,7 @@ function installAudiocraft() {
   }
 }
 
-function patchConfig(torchKind) {
+function patchConfig(torchPlan) {
   step("Updating ~/.vibe/config.json");
 
   let config = {};
@@ -281,14 +332,14 @@ function patchConfig(torchKind) {
     }
   }
 
-  // Pick a sensible default device based on platform + torch kind.
+  // Pick a sensible default device based on platform + torch plan.
   // The Python worker re-checks at startup if device==="auto", so this is
   // really just a hint for the user reading config.json.
   let defaultDevice = device;
   if (defaultDevice === "auto") {
     if (platform() === "darwin") defaultDevice = "mps";
-    else if (torchKind === "cuda121") defaultDevice = "cuda";
-    else defaultDevice = "cpu";
+    else if (torchPlan.kind === "cpu") defaultDevice = "cpu";
+    else defaultDevice = "cuda";
   }
 
   config.provider = "local";
