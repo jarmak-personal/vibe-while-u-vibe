@@ -12,9 +12,25 @@ Start by reading:
 - `~/.vibe/config.json` to determine `provider` (`elevenlabs` or `local`)
 - `~/.vibe/state.json` for live playback state
 
-Two hidden backend skills may also apply:
-- `vibe-local` when `config.provider === "local"`
-- `vibe-elevenlabs` when `config.provider === "elevenlabs"`
+## Backend-specific guidance (load on demand)
+
+Backend rules live *outside* this skill as plain markdown files under
+`~/.vibe/skill-guidance/`. They are not Claude Code skills — that's
+intentional: hidden sub-skills still keep their `description` frontmatter
+loaded in every session's context, which would mean carrying both backends'
+rules around even though only one provider is active at a time. Reading the
+right file on demand keeps the per-session footprint to just this skill.
+
+When a user request touches backend-specific behavior (vocals, generation
+speed, API keys, credit exhaustion, worker/venv errors, setup flow), first
+inspect `~/.vibe/config.json` and then `Read` the matching file before
+answering:
+
+- `provider === "local"` → `~/.vibe/skill-guidance/local.md`
+- `provider === "elevenlabs"` → `~/.vibe/skill-guidance/elevenlabs.md`
+
+Pure playback/volume/mood/genre commands don't need the guidance file —
+fall through to the mappings below.
 
 ## Daemon access
 
@@ -97,7 +113,7 @@ Known genre ids for excludes: `electronic`, `ambient`, `lofi`, `rock`, `metal`, 
 
 ### Vocals
 
-Backend-specific rules live in the hidden skills. Check `config.provider` first.
+Backend-specific — load the guidance file for the active provider first.
 
 - vocals on: `{"action":"setVocals","enabled":true}`
 - vocals off / instrumental only: `{"action":"setVocals","enabled":false}`

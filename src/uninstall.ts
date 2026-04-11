@@ -143,7 +143,14 @@ async function main(): Promise<void> {
     }
   }
 
-  // 4. Remove installed vibe skills
+  // 4. Remove installed vibe skills.
+  // Only `vibe` lives under ~/.claude/skills/ — the old hidden backend
+  // sub-skills (`vibe-local`, `vibe-elevenlabs`) were moved to plain
+  // markdown under ~/.vibe/skill-guidance/ so they wouldn't eat session
+  // context, and get removed as part of the ~/.vibe cleanup above. We still
+  // sweep the old names here so users upgrading from a previous install
+  // don't end up with orphan skill directories that Claude Code would keep
+  // advertising forever.
   const skillRoot = join(homedir(), ".claude", "skills");
   const skillNames = ["vibe", "vibe-local", "vibe-elevenlabs"];
   const removedSkills: string[] = [];

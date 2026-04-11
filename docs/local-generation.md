@@ -1,5 +1,11 @@
 # Local music generation
 
+> **Status:** shipped. This file started life as the design doc for the
+> local-backend work and still reads like a plan — some details below
+> describe the target state rather than the exact shipped implementation.
+> The code is the source of truth; use this file for the *why*, not the
+> *what*. Key divergences from the original plan are called out inline.
+
 Adds a zero-cost, local-hardware generation backend as an alternative to the
 ElevenLabs Music API. Targets Apple Silicon (MPS) and Nvidia GPUs (CUDA) on
 macOS, Linux, and Windows. Locks vocals off — local models are instrumental
@@ -197,9 +203,13 @@ POST /shutdown
   net, not load-bearing.
 - Startup: daemon spawns worker, polls `/health` every 500ms for up to 60s.
   If not ready in time → `GeneratorUnavailableError`.
-- Supervision: if the worker process dies, the daemon restarts it once per
-  session. Second crash → `generatorError` state, no more retries until
-  daemon restart.
+- Supervision: **no auto-restart**. If the worker process dies, the next
+  `generateTrack` throws `GeneratorUnavailableError` and the daemon enters
+  degraded mode — `state.error` surfaces the reason in the status line and
+  cached tracks keep looping. Recovery requires a daemon (i.e. Claude Code
+  session) restart. This is deliberate: silent cycling hides real problems,
+  and local worker crashes usually indicate env rot (missing venv, bad
+  torch install) that a restart won't fix anyway.
 
 ### Worker startup signal
 
@@ -257,7 +267,10 @@ If user picks 2:
      - Windows: `powershell -c "irm https://astral.sh/uv/install.ps1 | iex"`
    - `uv venv ~/.vibe/venv --python 3.11`
    - `uv pip install --python ~/.vibe/venv/bin/python torch audiocraft`
-     (Linux/Windows + CUDA: `uv pip install --index-url https://download.pytorch.org/whl/cu121 torch`)
+     (Linux/Windows + Nvidia: default PyPI wheel, which bundles a recent
+     CUDA 12.x runtime and is forward-compat with CUDA 13 drivers. Users can
+     pin a specific CTK via `--cuda 12.4` etc., which routes to the matching
+     `cu{major}{minor}` wheel index.)
    - Store the absolute venv python path in `config.local.pythonPath`.
 
 4. **Model download.**
@@ -344,9 +357,9 @@ Don't over-engineer upfront.
 - `src/generators/local.ts` — worker supervisor, implements `MusicGenerator`
 - `src/cache.ts` — `getCachedTracks`, `getCacheDir` (moved from elevenlabs.ts)
 - `python/worker.py` — HTTP server hosting the MusicGen model
-- `python/requirements.txt` — pinned deps (`torch`, `audiocraft`, `fastapi`, `uvicorn`)
+- `python/requirements.txt` — pinned `audiocraft==1.3.0`; torch/torchaudio are installed separately by `scripts/install-local.mjs` with a platform-specific `--index-url`. The worker serves HTTP via Python's stdlib `http.server`, so no `fastapi`/`uvicorn` deps.
 - `scripts/install-local.mjs` — called from setup, handles uv + venv + model download
-- `scripts/smoke-local.mjs` — local-only smoke test that runs a real 5s generation
+- `scripts/smoke-local.mjs` — local-only smoke test that runs a real end-to-end generation against the spawned worker
 - `docs/local-generation.md` — this file
 
 **Modified**
@@ -477,9 +490,9 @@ ElevenLabs quota check.
 ### New: smoke-local.mjs
 
 Gated on `VIBE_TEST_LOCAL=1`. Spins up the Python worker with the model
-size from `~/.vibe/config.json`, generates a 5-second clip, verifies the
-file, shuts down. Not run in CI — GH Actions has no GPU and the model
-download is too large anyway.
+size from `~/.vibe/config.json`, runs a real `generateTrack()` via
+`LocalGenerator`, verifies the file on disk, shuts down. Not run in CI —
+GH Actions has no GPU and the model download is too large anyway.
 
 ### Manual test plan
 

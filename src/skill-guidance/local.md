@@ -1,12 +1,22 @@
----
-name: vibe-local
-description: Local MusicGen-specific guidance for vibe-while-u-vibe. Use only when ~/.vibe/config.json has provider=local, especially for vocals, generation latency, worker errors, setup:local, and local cache behavior.
-user-invocable: false
----
+<!--
+  Backend-specific guidance for the `vibe` skill when config.provider === "local".
 
-# vibe-local
+  This file is NOT a Claude Code skill. It's plain markdown that the `vibe`
+  skill Reads on demand after it inspects ~/.vibe/config.json. We used to ship
+  this as a hidden sub-skill (user-invocable: false), but Claude Code still
+  keeps every skill's `description` frontmatter in session context so the model
+  can decide whether to load it — which meant both backends' frontmatter were
+  always loaded, for every session, even though only one provider is ever
+  active at a time. Moving the rules out of the skill directory drops that
+  per-session token cost while keeping the dispatch logic in one place (the
+  `vibe` skill itself).
 
-This skill applies only when `~/.vibe/config.json` has `provider: "local"`.
+  Installed to ~/.vibe/skill-guidance/local.md by setup/start-daemon.
+-->
+
+# vibe — local backend guidance
+
+Applies only when `~/.vibe/config.json` has `provider: "local"`.
 
 ## Rules
 

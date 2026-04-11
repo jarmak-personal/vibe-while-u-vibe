@@ -285,6 +285,10 @@ async function main(): Promise<void> {
   console.log(`  Hook scripts installed to ${hooksDir}`);
 
   // ── 7b. Install skills ──
+  // Only the user-invocable `vibe` skill lives in ~/.claude/skills/. Backend
+  // rules are shipped as plain markdown under ~/.vibe/skill-guidance/ and
+  // read on demand by the `vibe` skill — see the comment at the top of each
+  // guidance file for why they aren't sub-skills.
   const skillsSrcDir = join(__dirname, "skills");
   if (existsSync(skillsSrcDir)) {
     const claudeSkillsDir = join(homedir(), ".claude", "skills");
@@ -305,6 +309,32 @@ async function main(): Promise<void> {
     }
     if (installedSkills.length > 0) {
       console.log(`  Installed skills: ${installedSkills.join(", ")}`);
+    }
+  }
+
+  // ── 7c. Install backend guidance files ──
+  // Plain-markdown helpers the `vibe` skill reads on demand, keyed by
+  // config.provider. Not Claude Code skills — see the comment block at the
+  // top of each file for rationale.
+  const guidanceSrcDir = join(__dirname, "skill-guidance");
+  if (existsSync(guidanceSrcDir)) {
+    const guidanceDestDir = join(getVibeDir(), "skill-guidance");
+    if (!existsSync(guidanceDestDir)) {
+      mkdirSync(guidanceDestDir, { recursive: true });
+    }
+    const installedGuidance: string[] = [];
+    for (const entry of readdirSync(guidanceSrcDir, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith(".md")) continue;
+      copyFileSync(
+        join(guidanceSrcDir, entry.name),
+        join(guidanceDestDir, entry.name)
+      );
+      installedGuidance.push(entry.name);
+    }
+    if (installedGuidance.length > 0) {
+      console.log(
+        `  Installed skill guidance: ${installedGuidance.join(", ")}`
+      );
     }
   }
 

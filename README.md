@@ -13,14 +13,15 @@ You code with Claude Code
         |
    Haiku classifies the session "mood" from recent activity
         |
-   ElevenLabs generates a 3-min track from randomized sub-genres
+   Backend generates a track from randomized sub-genres
+     (ElevenLabs cloud, or local MusicGen on your GPU)
         |
    Plays in the background (afplay / ffplay / WMP), looping and caching
         |
    Status line shows:  ♫ Deep Focus
 ```
 
-The daemon watches what's happening in your session — file edits, test runs, git commands, error messages — and uses a lightweight LLM call (Haiku) to classify the current vibe into one of 8 moods. When the mood shifts, it picks random sub-genres from your allowed genre pool, generates new music via ElevenLabs, and starts playing. Tracks are cached locally so repeated moods don't burn API credits.
+The daemon watches what's happening in your session — file edits, test runs, git commands, error messages — and uses a lightweight LLM call (Haiku) to classify the current vibe into one of 8 moods. When the mood shifts, it picks random sub-genres from your allowed genre pool, generates new music via the selected backend, and starts playing. Tracks are cached locally so repeated moods don't burn API credits (or GPU time).
 
 ## Moods
 
@@ -166,13 +167,13 @@ npm run setup
 
 The setup wizard will:
 1. Ask which backend you want — **ElevenLabs** (cloud) or **local** (MusicGen)
-2. If local: ask model size and shell out to `scripts/install-local.mjs` (uv → venv → torch → audiocraft)
+2. If local: detect your GPU, ask model size, prompt for CUDA toolkit version (Linux/Windows + Nvidia only), and shell out to `scripts/install-local.mjs` (uv → venv → torch → audiocraft)
 3. If ElevenLabs: ask for your API key
 4. Set your preferred volume
 5. Let you exclude genres you don't want
 6. Ask if you want **interesting vibes** (cross-genre mashups) or normal
 7. Ask if you want **vocals** (Haiku writes lyrics) or instrumental — skipped in local mode
-8. Install hook scripts to `~/.vibe/hooks/` and the `/vibe` skill to `~/.claude/skills/vibe/`
+8. Install hook scripts to `~/.vibe/hooks/`, the `vibe` skill to `~/.claude/skills/`, and the backend guidance files (`local.md`, `elevenlabs.md`) to `~/.vibe/skill-guidance/`
 9. Patch `~/.claude/settings.json` with hooks and status line config
 
 ## Usage
@@ -183,7 +184,9 @@ The `SessionStart` hook launches the daemon automatically. As you work, hooks fo
 
 ### Controlling the vibe from Claude Code
 
-Setup installs a `/vibe` skill into `~/.claude/skills/vibe`. Inside any Claude Code session, just talk to it in plain English:
+Setup installs a single `vibe` skill under `~/.claude/skills/`. Backend-specific rules (vocals support, API key errors, worker troubleshooting, credit exhaustion) live as plain markdown under `~/.vibe/skill-guidance/local.md` and `~/.vibe/skill-guidance/elevenlabs.md` — the `vibe` skill reads whichever one matches `config.provider` on demand. That keeps the per-session context cost to one skill instead of three, since Claude Code otherwise loads every skill's description into every session even when the skill itself is never invoked.
+
+Inside any Claude Code session, just talk to the `vibe` skill in plain English:
 
 ```
 /vibe stop
@@ -241,6 +244,9 @@ curl http://127.0.0.1:$PORT/status
                                          debug/
                                          explore/
                                          ...
+                                       skill-guidance/  (backend rules the
+                                         local.md       `vibe` skill reads
+                                         elevenlabs.md  on demand)
 
 The `stop-daemon` hook doesn't actually kill the daemon — it forwards the
 SessionEnd event, and the daemon shuts itself down once its last session ends.
@@ -303,7 +309,7 @@ npm run uninstall -- --keep-cache      # scripted, keep ~/.vibe/cache
 npm run uninstall -- --yes             # scripted, remove everything
 ```
 
-Removes the daemon hooks from `~/.claude/settings.json`, deletes `~/.vibe/` (config, hooks, state), and removes the `/vibe` skill. Interactive mode also asks whether to keep the cached tracks so you don't lose music you liked — a future reinstall will pick them back up automatically. Or just tell Claude `/vibe uninstall` inside any session.
+Removes the daemon hooks from `~/.claude/settings.json`, deletes `~/.vibe/` (config, hooks, state, venv, model cache, skill-guidance), and removes the `vibe` skill from `~/.claude/skills/` (plus any orphan `vibe-local` / `vibe-elevenlabs` directories left over from previous installs). Interactive mode also asks whether to keep the cached tracks so you don't lose music you liked — a future reinstall will pick them back up automatically. Or just tell Claude `/vibe uninstall` inside any session.
 
 ## License
 

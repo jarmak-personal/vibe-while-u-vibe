@@ -1,6 +1,6 @@
-# audiocraft pulls in a compatible torch/torchaudio transitively, but we pin
-# the top-line versions explicitly so CUDA and MPS installs line up. Torch
-# itself is installed by scripts/install-local.mjs with the right --index-url
-# for the target platform (default PyPI for macOS/MPS, pytorch.org/cu121 for
-# Linux/Windows + CUDA).
+# audiocraft pulls in a compatible torch/torchaudio transitively, but
+# scripts/install-local.mjs installs torch first with the right --index-url
+# for the target platform (default PyPI for macOS/MPS and for Linux/Windows +
+# CUDA unless the user pins a CTK via --cuda; /whl/cpu for Linux/Windows with
+# no GPU) so the CUDA/MPS bindings line up before audiocraft goes in.
 audiocraft==1.3.0

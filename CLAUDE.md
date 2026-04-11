@@ -55,7 +55,7 @@ error instead of silent cycling).
 
 ## Tests
 
-Two tiers of smoke tests live under `scripts/`:
+Three tiers of smoke tests live under `scripts/`:
 
 **Local only** (`npm run test:smoke`) — exercises the real `claude` CLI:
 - `smoke-headless.mjs` — runs `classifyVibe` + `generateSessionLyrics` against a fake event buffer and prints the result.
@@ -67,7 +67,7 @@ Two tiers of smoke tests live under `scripts/`:
 **Local backend** (`VIBE_TEST_LOCAL=1 npm run test:smoke:local`) — opt-in:
 - `smoke-local.mjs` — spawns the real Python worker via `LocalGenerator`, generates one short clip, asserts it's a non-empty mp3, then shuts down. Skipped by default because it needs the venv + downloaded model weights.
 
-All three restore swapped modules in `finally`. The local tests call the real LLM (where applicable); CI and `smoke-local` do not.
+Smoke-ci restores its swapped `claude-headless` stub in `finally`; the injection-based tests just construct mock generators and need no teardown. Local tests call the real LLM (where applicable); CI and `smoke-local` do not.
 
 ## Architecture
 
@@ -88,6 +88,8 @@ All three restore swapped modules in `finally`. The local tests call the real LL
 - `src/status-line.mjs` — CC status line display script
 - `src/setup.ts` — interactive setup CLI (branches on backend choice)
 - `scripts/install-local.mjs` — uv + venv + torch + audiocraft bootstrap
+- `src/skills/vibe/SKILL.md` — single user-invocable Claude Code skill that talks to the daemon
+- `src/skill-guidance/{local,elevenlabs}.md` — plain-markdown backend rules, installed to `~/.vibe/skill-guidance/` and read on demand by the `vibe` skill (kept outside `src/skills/` so their frontmatter isn't loaded into every session's context)
 
 ## Key Design Points
 
