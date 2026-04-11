@@ -3,7 +3,7 @@
 import { createInterface } from "node:readline";
 import { readFileSync, writeFileSync, existsSync, copyFileSync, chmodSync, mkdirSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { homedir, platform } from "node:os";
+import { homedir, platform, arch } from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { loadConfig, saveConfig, ensureVibeDir, getVibeDir, type LocalModelSize } from "./config.js";
@@ -374,7 +374,13 @@ async function runLocalBackendSetup(
   let nvidiaDetected = false;
   let driverCudaHint: string | null = null; // e.g. "12.4" — just a display hint
   if (os === "darwin") {
-    hwSummary = "macOS detected — will use MPS (Apple Silicon GPU) if available.";
+    if (arch() !== "arm64") {
+      console.log(
+        "  Intel macOS detected — local MusicGen is not supported here. Use ElevenLabs instead.\n"
+      );
+      return false;
+    }
+    hwSummary = "Apple Silicon macOS detected — will use MPS.";
   } else if (os === "linux" || os === "win32") {
     // `nvidia-smi -L` lists GPUs; the full output (no -L) includes a header
     // line with "CUDA Version: X.Y" — that's the max CUDA the driver

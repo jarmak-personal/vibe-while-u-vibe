@@ -56,6 +56,7 @@ const IS_WINDOWS = platform() === "win32";
 const PY_BIN = IS_WINDOWS
   ? join(VENV_DIR, "Scripts", "python.exe")
   : join(VENV_DIR, "bin", "python");
+let UV_BIN = resolveUvBinary() ?? "uv";
 
 const args = parseArgs(process.argv.slice(2));
 const size = args.size ?? "medium";
@@ -80,6 +81,12 @@ main().catch((err) => {
 async function main() {
   ensureDir(VIBE_DIR);
   ensureDir(MODEL_CACHE_DIR);
+
+  if (platform() === "darwin" && arch() !== "arm64") {
+    fail(
+      "Local MusicGen is only supported on Apple Silicon Macs. Intel Macs should use the ElevenLabs backend instead."
+    );
+  }
 
   banner("vibe-while-u-vibe :: local backend installer");
   console.log(`  Platform: ${platform()} ${arch()}`);
@@ -130,8 +137,9 @@ function parseArgs(argv) {
 
 function ensureUv() {
   step("Checking for uv");
-  const probe = spawnSync("uv", ["--version"], { stdio: "ignore" });
-  if (probe.status === 0) {
+  const existingUv = resolveUvBinary();
+  if (existingUv) {
+    UV_BIN = existingUv;
     console.log("  uv already installed.");
     return;
   }
@@ -172,12 +180,13 @@ function ensureUv() {
   // After install, uv is at ~/.local/bin/uv (macOS/Linux) or
   // %USERPROFILE%\.local\bin\uv.exe (Windows). PATH might not be refreshed
   // in the current process — verify before continuing.
-  const recheck = spawnSync("uv", ["--version"], { stdio: "ignore" });
-  if (recheck.status !== 0) {
+  const installedUv = resolveUvBinary();
+  if (!installedUv) {
     fail(
-      "uv installed but not on PATH yet. Open a new shell and re-run `npm run setup:local`."
+      "uv install completed, but the binary could not be located. Install manually from https://docs.astral.sh/uv/ and re-run."
     );
   }
+  UV_BIN = installedUv;
 }
 
 function createVenv() {
@@ -190,7 +199,7 @@ function createVenv() {
   // --python 3.11 is required because audiocraft 1.3.0 doesn't ship wheels
   // for 3.13 yet, and 3.12 has spotty torch support on some platforms.
   const r = spawnSync(
-    "uv",
+    UV_BIN,
     ["venv", VENV_DIR, "--python", "3.11"],
     { stdio: "inherit" }
   );
@@ -283,7 +292,7 @@ function decideTorchInstall() {
 function installTorch(plan) {
   step(`Installing torch + torchaudio — ${plan.label}`);
   const r = spawnSync(
-    "uv",
+    UV_BIN,
     [
       "pip",
       "install",
@@ -310,7 +319,7 @@ function installAudiocraft() {
     );
   }
   const r = spawnSync(
-    "uv",
+    UV_BIN,
     ["pip", "install", "--python", PY_BIN, "-r", REQUIREMENTS_PATH],
     { stdio: "inherit" }
   );
@@ -385,4 +394,19 @@ function banner(msg) {
 function fail(msg) {
   console.error(`\n[install-local] ${msg}`);
   process.exit(1);
+}
+
+function resolveUvBinary() {
+  const candidates = [
+    "uv",
+    IS_WINDOWS
+      ? join(homedir(), ".local", "bin", "uv.exe")
+      : join(homedir(), ".local", "bin", "uv"),
+  ];
+
+  for (const candidate of candidates) {
+    const probe = spawnSync(candidate, ["--version"], { stdio: "ignore" });
+    if (probe.status === 0) return candidate;
+  }
+  return null;
 }
