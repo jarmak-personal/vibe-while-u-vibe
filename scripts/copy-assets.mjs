@@ -22,6 +22,13 @@ for (const stale of [
   rmSync(stale, { force: true });
 }
 
+// Wipe dist/skills and dist/skill-guidance before copying fresh. tsc leaves
+// removed source files behind in dist/, so without this a renamed or deleted
+// skill (e.g. the old hidden `vibe-local` / `vibe-elevenlabs` sub-skills)
+// would stick around in dist/ and get republished forever.
+rmSync(join(distDir, "skills"), { recursive: true, force: true });
+rmSync(join(distDir, "skill-guidance"), { recursive: true, force: true });
+
 function ensureDir(p) {
   if (!existsSync(p)) mkdirSync(p, { recursive: true });
 }
@@ -48,7 +55,28 @@ for (const file of readdirSync(hooksSrc)) {
 copyFile(join(srcDir, "status-line.mjs"), join(distDir, "status-line.mjs"), true);
 
 // 3. Skill markdown
-const skillSrc = join(srcDir, "skills", "vibe", "SKILL.md");
-if (existsSync(skillSrc)) {
-  copyFile(skillSrc, join(distDir, "skills", "vibe", "SKILL.md"));
+const skillsSrc = join(srcDir, "skills");
+if (existsSync(skillsSrc)) {
+  for (const entry of readdirSync(skillsSrc, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const skillSrc = join(skillsSrc, entry.name, "SKILL.md");
+    if (!existsSync(skillSrc)) continue;
+    copyFile(skillSrc, join(distDir, "skills", entry.name, "SKILL.md"));
+  }
+}
+
+// 4. Backend-specific guidance for the `vibe` skill.
+// These are *not* Claude Code skills — they're plain markdown that the main
+// vibe skill Reads on demand after inspecting config.provider. Shipped under
+// dist/skill-guidance/ and installed to ~/.vibe/skill-guidance/ so they
+// don't leak into every session's context the way hidden sub-skills do.
+const guidanceSrc = join(srcDir, "skill-guidance");
+if (existsSync(guidanceSrc)) {
+  for (const entry of readdirSync(guidanceSrc, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith(".md")) continue;
+    copyFile(
+      join(guidanceSrc, entry.name),
+      join(distDir, "skill-guidance", entry.name)
+    );
+  }
 }

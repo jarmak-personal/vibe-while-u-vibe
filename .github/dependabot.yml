@@ -1,0 +1,25 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      dev-dependencies:
+        dependency-type: development
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: pip
+    directory: "/python"
+    schedule:
+      interval: weekly
+    ignore:
+      # audiocraft is pinned because newer releases break compatibility with
+      # the torch/torchaudio wheels we install via scripts/install-local.mjs.
+      # Bumps need a manual smoke run on real hardware — see python/requirements.txt.
+      - dependency-name: audiocraft

@@ -11,6 +11,9 @@
   },
   "files": [
     "dist",
+    "scripts/install-local.mjs",
+    "python/worker.py",
+    "python/requirements.txt",
     "README.md",
     "LICENSE"
   ],
@@ -19,8 +22,10 @@
     "dev": "tsc --watch",
     "start": "node dist/daemon.js",
     "setup": "node dist/setup.js",
+    "setup:local": "node scripts/install-local.mjs",
     "uninstall": "node dist/uninstall.js",
     "test:smoke": "npm run build && node scripts/smoke-headless.mjs && node scripts/smoke-wiring.mjs",
+    "test:smoke:local": "VIBE_TEST_LOCAL=1 node scripts/smoke-local.mjs",
     "test:ci": "node scripts/smoke-ci.mjs",
     "prepublishOnly": "npm run build"
   },

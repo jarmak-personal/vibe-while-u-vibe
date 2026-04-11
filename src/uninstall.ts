@@ -143,11 +143,25 @@ async function main(): Promise<void> {
     }
   }
 
-  // 4. Remove ~/.claude/skills/vibe
-  const skillDir = join(homedir(), ".claude", "skills", "vibe");
-  if (existsSync(skillDir)) {
+  // 4. Remove installed vibe skills.
+  // Only `vibe` lives under ~/.claude/skills/ — the old hidden backend
+  // sub-skills (`vibe-local`, `vibe-elevenlabs`) were moved to plain
+  // markdown under ~/.vibe/skill-guidance/ so they wouldn't eat session
+  // context, and get removed as part of the ~/.vibe cleanup above. We still
+  // sweep the old names here so users upgrading from a previous install
+  // don't end up with orphan skill directories that Claude Code would keep
+  // advertising forever.
+  const skillRoot = join(homedir(), ".claude", "skills");
+  const skillNames = ["vibe", "vibe-local", "vibe-elevenlabs"];
+  const removedSkills: string[] = [];
+  for (const name of skillNames) {
+    const skillDir = join(skillRoot, name);
+    if (!existsSync(skillDir)) continue;
     rmSync(skillDir, { recursive: true, force: true });
-    console.log("  Removed ~/.claude/skills/vibe");
+    removedSkills.push(name);
+  }
+  if (removedSkills.length > 0) {
+    console.log(`  Removed skills: ${removedSkills.join(", ")}`);
   }
 
   console.log("\n  Uninstalled. Your Claude Code sessions will no longer play music.\n");

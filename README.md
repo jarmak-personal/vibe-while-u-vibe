@@ -13,14 +13,15 @@ You code with Claude Code
         |
    Haiku classifies the session "mood" from recent activity
         |
-   ElevenLabs generates a 3-min track from randomized sub-genres
+   Backend generates a track from randomized sub-genres
+     (ElevenLabs cloud, or local MusicGen on your GPU)
         |
    Plays in the background (afplay / ffplay / WMP), looping and caching
         |
    Status line shows:  ♫ Deep Focus
 ```
 
-The daemon watches what's happening in your session — file edits, test runs, git commands, error messages — and uses a lightweight LLM call (Haiku) to classify the current vibe into one of 8 moods. When the mood shifts, it picks random sub-genres from your allowed genre pool, generates new music via ElevenLabs, and starts playing. Tracks are cached locally so repeated moods don't burn API credits.
+The daemon watches what's happening in your session — file edits, test runs, git commands, error messages — and uses a lightweight LLM call (Haiku) to classify the current vibe into one of 8 moods. When the mood shifts, it picks random sub-genres from your allowed genre pool, generates new music via the selected backend, and starts playing. Tracks are cached locally so repeated moods don't burn API credits (or GPU time).
 
 ## Moods
 
@@ -76,11 +77,24 @@ By default, tracks are instrumental. Turn on **vocals mode** and Haiku will writ
 
 Debugging auth middleware? You might hear a verse about chasing down a rogue session token. Shipping a PR? Expect a triumphant chorus about merging to main.
 
+## Backends
+
+The daemon ships with two music generators — pick one during `npm run setup`:
+
+| Backend | Cost | Vocals | Speed | Hardware |
+|---------|------|--------|-------|----------|
+| **ElevenLabs** (default) | Paid (~$22/mo for daily use) | Yes | Fast (cloud) | Any |
+| **Local MusicGen** | Free | No (instrumental only) | 30s–2min per clip | Apple Silicon (MPS) or Nvidia GPU strongly recommended |
+
+**Local mode** runs Meta's [MusicGen](https://github.com/facebookresearch/audiocraft) on your own hardware via a small Python worker the daemon manages. No ElevenLabs key, no API calls, no credit ceiling — but it's instrumental only (vocals mode is force-disabled when local is selected) and you'll want a GPU. Run `npm run setup:local` to bootstrap the venv (uv → Python 3.11 → torch → audiocraft); see [the local backend section](#local-mode) below.
+
 ## Requirements
 
 - **Node.js >= 18**
 - **Claude Code** (uses headless mode for mood classification)
-- **[ElevenLabs API key](https://elevenlabs.io)** — see [credit budget](#elevenlabs-credit-budget) below; **Creator tier recommended**
+- One of:
+  - **[ElevenLabs API key](https://elevenlabs.io)** — see [credit budget](#elevenlabs-credit-budget) below; **Creator tier recommended**
+  - **Local backend hardware** — Apple Silicon Mac, or Linux/Windows with an Nvidia GPU + CUDA 12. CPU-only works but is too slow for daily use.
 - An audio playback backend for your OS:
   - **macOS**: `afplay` (pre-installed — nothing to do)
   - **Linux**: `ffplay` from [ffmpeg](https://ffmpeg.org/) — e.g. `sudo apt install ffmpeg` or `sudo dnf install ffmpeg`
@@ -102,6 +116,45 @@ Even so, Free runs dry after a session or two and Starter won't last a week of d
 
 When your credits run out, cached tracks keep playing but the status line will show `⚠ ElevenLabs out of credits` and no new music will generate until you top up or upgrade.
 
+## Local mode
+
+If you'd rather not pay for ElevenLabs (or you've burned through your credits and want to keep generating fresh tracks), the local backend runs [Meta's MusicGen](https://github.com/facebookresearch/audiocraft) on your own machine. Free, unlimited, and instrumental.
+
+```bash
+npm run setup        # pick "local" when asked
+# or, if you've already run setup:
+npm run setup:local  # just bootstraps the local backend
+```
+
+`setup:local` will:
+
+1. Install [uv](https://docs.astral.sh/uv/) if you don't have it.
+2. Create a Python 3.11 venv at `~/.vibe/venv`.
+3. Install `torch` + `torchaudio` from the right wheel index for your system:
+   - **macOS** (any Mac, including Apple Silicon) → default PyPI; MPS support is in the standard wheel.
+   - **Linux/Windows + Nvidia GPU** → default PyPI, which bundles a recent CUDA 12.x runtime and works on any CUDA 12+ driver (including CUDA 13 via forward-compat). If you want to pin a specific toolkit version (e.g. because you're building custom extensions against your local CTK), the setup CLI prompts you for a CUDA `major.minor` and passes it through as `--cuda 12.4` → `cu124` wheel index, etc.
+   - **Linux/Windows, no GPU** → CPU wheels (with a loud warning — generation will be too slow for real use).
+4. Install `audiocraft==1.3.0`.
+5. Write a `local` config block into `~/.vibe/config.json` with `provider="local"`.
+
+### Choosing a model size
+
+| Size | Download | VRAM/RAM | Quality | Speed |
+|------|----------|----------|---------|-------|
+| `small` | ~1.5 GB | ~4 GB | OK | Fast |
+| **`medium`** (default) | ~3.3 GB | ~7 GB | Good | Medium |
+| `large` | ~13 GB | ~16 GB | Best | Slow |
+
+Models are cached under `~/.vibe/models` (via `HF_HOME`) so `npm run uninstall` cleans them up too.
+
+### How it runs
+
+The daemon spawns `python/worker.py` as a child process at boot. The worker hosts the MusicGen model, prints `VIBE_WORKER_READY` on stdout when loaded, and serves `POST /generate` on a loopback port with an `X-Vibe-Token` shared secret. The Node side just `fetch()`es it like any other generator. If the worker dies, the daemon enters degraded mode and surfaces an error in the status line — restart your Claude Code session to recover.
+
+### Vocals are off in local mode
+
+MusicGen is instrumental-only. `loadConfig()` enforces this: when `provider === "local"` it forces `vocals = false`, even if you hand-edit `config.json`. The setup CLI also skips the vocals prompt when local is selected.
+
 ## Install
 
 ```bash
@@ -113,13 +166,15 @@ npm run setup
 ```
 
 The setup wizard will:
-1. Ask for your ElevenLabs API key
-2. Set your preferred volume
-3. Let you exclude genres you don't want
-4. Ask if you want **interesting vibes** (cross-genre mashups) or normal
-5. Ask if you want **vocals** (Haiku writes lyrics) or instrumental
-6. Install hook scripts to `~/.vibe/hooks/` and the `/vibe` skill to `~/.claude/skills/vibe/`
-7. Patch `~/.claude/settings.json` with hooks and status line config
+1. Ask which backend you want — **ElevenLabs** (cloud) or **local** (MusicGen)
+2. If local: detect your GPU, ask model size, prompt for CUDA toolkit version (Linux/Windows + Nvidia only), and shell out to `scripts/install-local.mjs` (uv → venv → torch → audiocraft)
+3. If ElevenLabs: ask for your API key
+4. Set your preferred volume
+5. Let you exclude genres you don't want
+6. Ask if you want **interesting vibes** (cross-genre mashups) or normal
+7. Ask if you want **vocals** (Haiku writes lyrics) or instrumental — skipped in local mode
+8. Install hook scripts to `~/.vibe/hooks/`, the `vibe` skill to `~/.claude/skills/`, and the backend guidance files (`local.md`, `elevenlabs.md`) to `~/.vibe/skill-guidance/`
+9. Patch `~/.claude/settings.json` with hooks and status line config
 
 ## Usage
 
@@ -129,7 +184,9 @@ The `SessionStart` hook launches the daemon automatically. As you work, hooks fo
 
 ### Controlling the vibe from Claude Code
 
-Setup installs a `/vibe` skill into `~/.claude/skills/vibe`. Inside any Claude Code session, just talk to it in plain English:
+Setup installs a single `vibe` skill under `~/.claude/skills/`. Backend-specific rules (vocals support, API key errors, worker troubleshooting, credit exhaustion) live as plain markdown under `~/.vibe/skill-guidance/local.md` and `~/.vibe/skill-guidance/elevenlabs.md` — the `vibe` skill reads whichever one matches `config.provider` on demand. That keeps the per-session context cost to one skill instead of three, since Claude Code otherwise loads every skill's description into every session even when the skill itself is never invoked.
+
+Inside any Claude Code session, just talk to the `vibe` skill in plain English:
 
 ```
 /vibe stop
@@ -183,10 +240,16 @@ curl http://127.0.0.1:$PORT/status
     UserPromptSubmit -> send-event     daemon.log       (daemon output)
     Stop             -> send-event     hooks/           (installed hook scripts)
   statusLine:                          cache/
-    -> status-line.mjs                   focus/         (cached mp3s by mood)
-                                         debug/
-                                         explore/
-                                         ...
+    -> status-line.mjs                   instrumental/  (rotated cache, both backends)
+                                           focus/*.mp3
+                                           debug/*.mp3
+                                           ...
+                                         vocals/        (one-shot, ElevenLabs only,
+                                           focus/*.mp3   never rotated)
+                                           ...
+                                       skill-guidance/  (backend rules the
+                                         local.md       `vibe` skill reads
+                                         elevenlabs.md  on demand)
 
 The `stop-daemon` hook doesn't actually kill the daemon — it forwards the
 SessionEnd event, and the daemon shuts itself down once its last session ends.
@@ -208,13 +271,33 @@ SessionEnd event, and the daemon shuts itself down once its last session ends.
 
 ```json
 {
+  "provider": "elevenlabs",
   "elevenLabsApiKey": "sk-...",
   "volume": 0.3,
-  "port": 7773,
   "enabled": true,
   "excludedGenres": ["metal", "country"],
   "interestingVibes": false,
-  "vocals": false
+  "vocals": false,
+  "local": null
+}
+```
+
+The daemon binds to a random loopback port at startup and writes the bound port to `~/.vibe/daemon.port` — the hooks and the `vibe` skill read it from there.
+
+In local mode, the `local` block is populated and `provider` flips:
+
+```json
+{
+  "provider": "local",
+  "vocals": false,
+  "local": {
+    "backend": "musicgen",
+    "size": "medium",
+    "device": "mps",
+    "workerPort": 7774,
+    "pythonPath": "/Users/you/.vibe/venv/bin/python",
+    "modelCacheDir": "/Users/you/.vibe/models"
+  }
 }
 ```
 
@@ -230,7 +313,7 @@ npm run uninstall -- --keep-cache      # scripted, keep ~/.vibe/cache
 npm run uninstall -- --yes             # scripted, remove everything
 ```
 
-Removes the daemon hooks from `~/.claude/settings.json`, deletes `~/.vibe/` (config, hooks, state), and removes the `/vibe` skill. Interactive mode also asks whether to keep the cached tracks so you don't lose music you liked — a future reinstall will pick them back up automatically. Or just tell Claude `/vibe uninstall` inside any session.
+Removes the daemon hooks from `~/.claude/settings.json`, deletes `~/.vibe/` (config, hooks, state, venv, model cache, skill-guidance), and removes the `vibe` skill from `~/.claude/skills/` (plus any orphan `vibe-local` / `vibe-elevenlabs` directories left over from previous installs). Interactive mode also asks whether to keep the cached tracks so you don't lose music you liked — a future reinstall will pick them back up automatically. Or just tell Claude `/vibe uninstall` inside any session.
 
 ## License
 

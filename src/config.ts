@@ -2,6 +2,24 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync } from "n
 import { join } from "node:path";
 import { homedir } from "node:os";
 
+export type Provider = "elevenlabs" | "local";
+export type LocalModelSize = "small" | "medium" | "large";
+export type LocalDevice = "mps" | "cuda" | "auto";
+
+export interface LocalConfig {
+  /** Only "musicgen" is supported today; reserved for future backends. */
+  backend: "musicgen";
+  size: LocalModelSize;
+  /** "auto" resolves at worker startup via torch's device probes. */
+  device: LocalDevice;
+  /** Port the Python HTTP worker binds to (loopback only). */
+  workerPort: number;
+  /** Absolute path to the venv python binary — written by install-local.mjs. */
+  pythonPath: string;
+  /** Absolute path to the HF_HOME-style model cache (defaults to ~/.vibe/models). */
+  modelCacheDir: string;
+}
+
 export interface VibeConfig {
   elevenLabsApiKey: string | null;
   volume: number;
@@ -15,16 +33,20 @@ export interface VibeConfig {
    * Max cached instrumental tracks kept per mood. Once reached, no new
    * generation happens for that mood — the cached tracks rotate. Vocals
    * mode bypasses the cache entirely so this has no effect there.
-   * Higher = more variety, more ElevenLabs credits burned during warmup.
+   * Higher = more variety, more generation cost burned during warmup.
    */
   cacheSizePerMood: number;
   /**
-   * Zero-credit mode: never call ElevenLabs. Only play whatever is already
+   * Zero-credit mode: never call the generator. Only play whatever is already
    * cached under ~/.vibe/cache. Useful once warmup is done, or for users
    * who have burned their monthly credits. Moods with an empty cache will
    * stay silent and surface a message via state.error.
    */
   cacheOnlyMode: boolean;
+  /** Generation backend selection. */
+  provider: Provider;
+  /** Local backend config — populated when provider === "local". */
+  local: LocalConfig | null;
 }
 
 const VIBE_DIR = join(homedir(), ".vibe");
@@ -41,6 +63,8 @@ const DEFAULT_CONFIG: VibeConfig = {
   genreHint: null,
   cacheSizePerMood: 3,
   cacheOnlyMode: false,
+  provider: "elevenlabs",
+  local: null,
 };
 
 export function getVibeDir(): string {
@@ -59,15 +83,24 @@ export function ensureVibeDir(): void {
 
 export function loadConfig(): VibeConfig {
   ensureVibeDir();
+  let config: VibeConfig;
   if (!existsSync(CONFIG_PATH)) {
-    return { ...DEFAULT_CONFIG };
+    config = { ...DEFAULT_CONFIG };
+  } else {
+    try {
+      const raw = readFileSync(CONFIG_PATH, "utf-8");
+      config = { ...DEFAULT_CONFIG, ...JSON.parse(raw) };
+    } catch {
+      config = { ...DEFAULT_CONFIG };
+    }
   }
-  try {
-    const raw = readFileSync(CONFIG_PATH, "utf-8");
-    return { ...DEFAULT_CONFIG, ...JSON.parse(raw) };
-  } catch {
-    return { ...DEFAULT_CONFIG };
+  // Invariant: local backend cannot do vocals. Force the flag off at load
+  // time so no runtime path ever sees an inconsistent state — covers hand-
+  // edited config.json and old configs migrated to provider=local.
+  if (config.provider === "local") {
+    config.vocals = false;
   }
+  return config;
 }
 
 export function saveConfig(config: VibeConfig): void {

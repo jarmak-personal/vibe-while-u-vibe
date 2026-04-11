@@ -4,6 +4,11 @@ export interface Genre {
   subGenres: string[];
 }
 
+export interface GenreSelection {
+  genreId: string;
+  subGenre: string;
+}
+
 export const GENRES: Genre[] = [
   {
     id: "electronic",
@@ -185,6 +190,36 @@ export function pickSubGenres(
     }
   }
   return picked.length > 0 ? picked : ["ambient electronic"];
+}
+
+export function pickGenreSelections(
+  excludedGenreIds: string[],
+  count = 1
+): GenreSelection[] {
+  const allowed = GENRES.filter((g) => !excludedGenreIds.includes(g.id));
+  if (allowed.length === 0) {
+    return [{ genreId: "ambient", subGenre: "ambient electronic" }];
+  }
+
+  const picked: GenreSelection[] = [];
+  const seen = new Set<string>();
+  let attempts = 0;
+  const maxAttempts = Math.max(8, count * 6);
+
+  while (picked.length < count && attempts < maxAttempts) {
+    attempts++;
+    const genre = allowed[Math.floor(Math.random() * allowed.length)];
+    const subGenre =
+      genre.subGenres[Math.floor(Math.random() * genre.subGenres.length)];
+    const key = `${genre.id}:${subGenre}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    picked.push({ genreId: genre.id, subGenre });
+  }
+
+  return picked.length > 0
+    ? picked
+    : [{ genreId: "ambient", subGenre: "ambient electronic" }];
 }
 
 /**
