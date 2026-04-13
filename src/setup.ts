@@ -6,7 +6,8 @@ import { join, dirname } from "node:path";
 import { homedir, platform, arch } from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { loadConfig, saveConfig, ensureVibeDir, getVibeDir, type LocalModelSize } from "./config.js";
+import { loadConfig, saveConfig, ensureVibeDir, getVibeDir, DEFAULT_ACE_STEP_CONFIG, type LocalModelSize, type LocalBackend } from "./config.js";
+import { recommendLocalMusicModel, type HardwareProfile } from "./local-model-selector.js";
 import { GENRES } from "./genres.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -37,13 +38,11 @@ async function main(): Promise<void> {
   const previousVocals = config.vocals;
 
   // ── 1. Backend selection ──
-  // Two providers today: ElevenLabs (cloud, paid, vocals supported) and
-  // local MusicGen (free, instrumental only, needs GPU for usable speed).
   console.log("  ── Backend ──\n");
   console.log("  ElevenLabs (cloud) — paid API, supports vocals, fast.");
   console.log("    Burns ~1,500 credits/min; Creator tier (~$22/mo) lasts ~35 tracks.");
-  console.log("  Local MusicGen     — free, instrumental only, runs on your hardware.");
-  console.log("    Needs Apple Silicon (MPS) or Nvidia GPU for usable speed.\n");
+  console.log("  Local (ACE-Step)   — free, instrumental only, runs on your hardware.");
+  console.log("    Needs Apple Silicon (MPS) or Nvidia GPU, plus system ffmpeg. MusicGen fallback for weak hardware.\n");
 
   const currentBackend = config.provider;
   const backendAnswer = (
@@ -153,15 +152,22 @@ async function main(): Promise<void> {
   }
 
   // ── 3b. Cache size per mood ──
-  console.log("\n  ── Variety vs credits ──\n");
-  console.log("  Each mood caches up to N instrumental tracks. Higher = more");
-  console.log("  variety, but warmup burns more ElevenLabs credits.");
-  console.log("  Rough warmup cost (8 moods × N × 3 min × 1,500 credits/min):");
-  console.log("    1  →  36k credits   (~22% of Creator monthly, least variety)");
-  console.log("    2  →  72k credits   (~45%)");
-  console.log("    3  →  108k credits  (~67%, recommended)");
-  console.log("    5  →  180k credits  (exceeds Creator — needs Pro)");
-  console.log("  Vocals mode ignores this cap — every track is freshly generated.\n");
+  if (config.provider === "local") {
+    console.log("\n  ── Variety vs warmup ──\n");
+    console.log("  Each mood caches up to N instrumental tracks.");
+    console.log("  Higher = more variety, but more local generation time during warmup.");
+    console.log("  This also uses more disk space under ~/.vibe/cache.\n");
+  } else {
+    console.log("\n  ── Variety vs credits ──\n");
+    console.log("  Each mood caches up to N instrumental tracks. Higher = more");
+    console.log("  variety, but warmup burns more ElevenLabs credits.");
+    console.log("  Rough warmup cost (8 moods × N × 3 min × 1,500 credits/min):");
+    console.log("    1  →  36k credits   (~22% of Creator monthly, least variety)");
+    console.log("    2  →  72k credits   (~45%)");
+    console.log("    3  →  108k credits  (~67%, recommended)");
+    console.log("    5  →  180k credits  (exceeds Creator — needs Pro)");
+    console.log("  Vocals mode ignores this cap — every track is freshly generated.\n");
+  }
 
   const cacheAnswer = await ask(`  Tracks per mood [${config.cacheSizePerMood}]: `);
   if (cacheAnswer) {
@@ -173,10 +179,17 @@ async function main(): Promise<void> {
 
   // ── 3c. Cache-only mode ──
   console.log("\n  ── Cache-only mode ──\n");
-  console.log("  Zero-credit mode: never call ElevenLabs, just rotate the");
-  console.log("  tracks already in ~/.vibe/cache. Moods with no cached tracks");
-  console.log("  yet will stay silent. Good for after warmup, or if you've");
-  console.log("  burned through your monthly credits.\n");
+  if (config.provider === "local") {
+    console.log("  Never generate new local tracks; just rotate what's already");
+    console.log("  cached in ~/.vibe/cache. Moods with no cached tracks yet");
+    console.log("  will stay silent. Useful if local generation is too slow");
+    console.log("  on your machine after initial warmup.\n");
+  } else {
+    console.log("  Zero-credit mode: never call ElevenLabs, just rotate the");
+    console.log("  tracks already in ~/.vibe/cache. Moods with no cached tracks");
+    console.log("  yet will stay silent. Good for after warmup, or if you've");
+    console.log("  burned through your monthly credits.\n");
+  }
 
   const currentCacheOnly = config.cacheOnlyMode ? "on" : "off";
   const cacheOnlyAnswer = (await ask(
@@ -209,8 +222,6 @@ async function main(): Promise<void> {
   );
 
   // ── 5. Vocals ──
-  // Local backend can't generate vocals (MusicGen is instrumental-only), so
-  // skip the prompt entirely and leave vocals=false from the local-setup step.
   if (config.provider === "local") {
     console.log("\n  ── Vocals ──\n");
     console.log("  Local backend is instrumental only — skipping vocals prompt.");
@@ -367,40 +378,42 @@ async function runLocalBackendSetup(
 ): Promise<boolean> {
   console.log("  ── Local backend ──\n");
 
-  // Hardware sniff so the user knows what to expect *before* committing to
-  // the install. We can't import torch from JS, so we just check OS + GPU.
   const os = platform();
   let hwSummary: string;
   let nvidiaDetected = false;
-  let driverCudaHint: string | null = null; // e.g. "12.4" — just a display hint
+  let driverCudaHint: string | null = null;
+  let vramGb: number | undefined;
+  let unifiedMemoryGb: number | undefined;
+  let hwBackend: HardwareProfile["backend"] = "cpu";
+
   if (os === "darwin") {
     if (arch() !== "arm64") {
       console.log(
-        "  Intel macOS detected — local MusicGen is not supported here. Use ElevenLabs instead.\n"
+        "  Intel macOS detected — local generation is not supported here. Use ElevenLabs instead.\n"
       );
       return false;
     }
-    hwSummary = "Apple Silicon macOS detected — will use MPS.";
+    hwBackend = "mps";
+    unifiedMemoryGb = detectAppleSiliconMemory();
+    hwSummary = `Apple Silicon macOS detected — will use MPS. ${unifiedMemoryGb ?? "?"} GB unified memory.`;
   } else if (os === "linux" || os === "win32") {
-    // `nvidia-smi -L` lists GPUs; the full output (no -L) includes a header
-    // line with "CUDA Version: X.Y" — that's the max CUDA the driver
-    // supports, NOT the toolkit the user has installed. We show it as a hint
-    // and still prompt the user for their actual CTK version below.
     const smiList = spawnSync("nvidia-smi", ["-L"], { stdio: "pipe" });
     const hasGpu =
       smiList.status === 0 &&
       /GPU \d+:/.test(smiList.stdout?.toString() ?? "");
     if (hasGpu) {
       nvidiaDetected = true;
+      hwBackend = "cuda";
       const firstLine =
         smiList.stdout.toString().trim().split("\n")[0] ?? "Nvidia GPU";
       const smiHeader = spawnSync("nvidia-smi", [], { stdio: "pipe" });
       const headerOut = smiHeader.stdout?.toString() ?? "";
       const m = headerOut.match(/CUDA Version:\s*(\d+\.\d+)/);
       driverCudaHint = m ? m[1] : null;
+      vramGb = detectNvidiaVram();
       hwSummary = driverCudaHint
-        ? `Nvidia GPU detected: ${firstLine} (driver supports CUDA ≤ ${driverCudaHint})`
-        : `Nvidia GPU detected: ${firstLine}`;
+        ? `Nvidia GPU detected: ${firstLine} (driver supports CUDA ≤ ${driverCudaHint}, ${vramGb ?? "?"} GB VRAM)`
+        : `Nvidia GPU detected: ${firstLine} (${vramGb ?? "?"} GB VRAM)`;
     } else {
       hwSummary =
         "No Nvidia GPU detected — install will fall back to CPU torch wheels (very slow).";
@@ -410,28 +423,49 @@ async function runLocalBackendSetup(
   }
   console.log(`  ${hwSummary}\n`);
 
-  // Model size — drives both download size and generation latency.
-  console.log("  Model size:");
-  console.log("    small   ~1.5 GB,  fastest, lowest quality");
-  console.log("    medium  ~3.3 GB,  good balance  ← recommended");
-  console.log("    large   ~13 GB,   highest quality, slowest, big VRAM\n");
+  const recommendation = recommendLocalMusicModel({
+    platform: os as HardwareProfile["platform"],
+    backend: hwBackend,
+    vramGb,
+    unifiedMemoryGb,
+  });
+  const recommendedAceStep = recommendation.aceStep ?? DEFAULT_ACE_STEP_CONFIG;
 
-  const currentSize = config.local?.size ?? "medium";
-  const sizeAnswer = (
-    await ask(`  Size? (small/medium/large) [${currentSize}]: `)
+  console.log(`  Recommended model: ${formatRecommendation(recommendation)}`);
+  console.log(`  Reason: ${recommendation.reason}\n`);
+
+  let selectedBackend: LocalBackend = recommendation.localBackend;
+  let size: LocalModelSize = recommendation.musicgenSize ?? config.local?.size ?? "medium";
+
+  const backendOverride = (
+    await ask(`  Backend? (ace-step/musicgen) [${selectedBackend}]: `)
   ).toLowerCase();
-  let size: LocalModelSize = currentSize;
-  if (sizeAnswer === "small" || sizeAnswer === "s") size = "small";
-  else if (sizeAnswer === "medium" || sizeAnswer === "m") size = "medium";
-  else if (sizeAnswer === "large" || sizeAnswer === "l") size = "large";
+  if (backendOverride === "musicgen" || backendOverride === "m") {
+    selectedBackend = "musicgen";
+  } else if (backendOverride === "ace-step" || backendOverride === "a" || backendOverride === "ace") {
+    selectedBackend = "ace-step";
+  }
 
-  console.log(`  Size: ${size}\n`);
+  if (selectedBackend === "musicgen") {
+    console.log("\n  MusicGen model size:");
+    console.log("    small   ~1.5 GB,  fastest, lowest quality");
+    console.log("    medium  ~3.3 GB,  good balance  ← recommended");
+    console.log("    large   ~13 GB,   highest quality, slowest, big VRAM\n");
 
-  // CUDA toolkit version — only when we're on Linux/Windows with an Nvidia
-  // GPU. We ask the user rather than auto-detecting because `nvidia-smi`
-  // reports the *driver's max supported CUDA*, not the CTK the user has
-  // installed. Blank input → default PyTorch build (no --index-url), which
-  // currently bundles CUDA 12.x and is forward-compat with CUDA 13 drivers.
+    const currentSize = config.local?.size ?? "medium";
+    const sizeAnswer = (
+      await ask(`  Size? (small/medium/large) [${currentSize}]: `)
+    ).toLowerCase();
+    if (sizeAnswer === "small" || sizeAnswer === "s") size = "small";
+    else if (sizeAnswer === "medium" || sizeAnswer === "m") size = "medium";
+    else if (sizeAnswer === "large" || sizeAnswer === "l") size = "large";
+    console.log(`  Size: ${size}\n`);
+  } else {
+    console.log(
+      `\n  ACE-Step config: ${formatAceStepConfig(recommendedAceStep)}\n`
+    );
+  }
+
   let cudaArg: string | null = null;
   if (nvidiaDetected) {
     console.log("  CUDA toolkit:");
@@ -460,10 +494,9 @@ async function runLocalBackendSetup(
     );
   }
 
-  // Confirm before kicking off a multi-GB install.
   const proceed = (
     await ask(
-      "  Run installer now? Downloads uv, creates a venv, installs torch + audiocraft. (Y/n): "
+      "  Run installer now? Checks ffmpeg, downloads uv, creates a venv, installs torch + dependencies. (Y/n): "
     )
   ).toLowerCase();
   if (proceed === "n" || proceed === "no") {
@@ -471,14 +504,19 @@ async function runLocalBackendSetup(
     return config.local !== null;
   }
 
-  // Shell out to the install script. We use stdio:inherit so the user sees
-  // the install logs in real time — uv pip install is chatty and slow, and
-  // hiding it would feel like the setup hung.
   const installArgs = [
     join(__dirname, "..", "scripts", "install-local.mjs"),
+    "--backend",
+    selectedBackend,
     "--size",
     size,
   ];
+  if (selectedBackend === "ace-step") {
+    installArgs.push("--dit-model", recommendedAceStep.ditModel);
+    if (recommendedAceStep.lmModel) {
+      installArgs.push("--lm-model", recommendedAceStep.lmModel);
+    }
+  }
   if (cudaArg) {
     installArgs.push("--cuda", cudaArg);
   }
@@ -493,9 +531,6 @@ async function runLocalBackendSetup(
     return config.local !== null;
   }
 
-  // The installer wrote ~/.vibe/config.json with provider=local + local block.
-  // Reload so the in-memory config sees those changes before the rest of
-  // setup overwrites the file.
   const reloaded = loadConfig();
   config.provider = reloaded.provider;
   config.local = reloaded.local;
@@ -503,11 +538,51 @@ async function runLocalBackendSetup(
   return config.local !== null;
 }
 
+function detectAppleSiliconMemory(): number | undefined {
+  const r = spawnSync("sysctl", ["-n", "hw.memsize"], { stdio: "pipe" });
+  if (r.status !== 0) return undefined;
+  const bytes = parseInt(r.stdout.toString().trim(), 10);
+  if (isNaN(bytes)) return undefined;
+  return Math.round(bytes / (1024 * 1024 * 1024));
+}
+
+function detectNvidiaVram(): number | undefined {
+  const r = spawnSync(
+    "nvidia-smi",
+    ["--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+    { stdio: "pipe" },
+  );
+  if (r.status !== 0) return undefined;
+  const mb = parseInt(r.stdout.toString().trim().split("\n")[0], 10);
+  if (isNaN(mb)) return undefined;
+  return Math.round(mb / 1024);
+}
+
+function formatRecommendation(rec: ReturnType<typeof recommendLocalMusicModel>): string {
+  if (rec.localBackend === "musicgen") {
+    return `MusicGen ${rec.musicgenSize ?? "medium"}`;
+  }
+  return formatAceStepConfig(rec.aceStep ?? DEFAULT_ACE_STEP_CONFIG);
+}
+
+function formatAceStepConfig(aceStep: typeof DEFAULT_ACE_STEP_CONFIG): string {
+  const dit = aceStep.ditModel;
+  const lm = aceStep.lmModel;
+  return lm ? `${dit} + ${lm}` : `${dit} (DiT only)`;
+}
+
 function printSummary(config: ReturnType<typeof loadConfig>): void {
   console.log("  Your config:");
-  console.log(`    Backend:     ${config.provider}${config.local ? ` (${config.local.size})` : ""}`);
+  const localLabel = config.local
+    ? config.local.backend === "ace-step" && config.local.aceStep
+      ? ` (${config.local.aceStep.ditModel}${config.local.aceStep.lmModel ? " + " + config.local.aceStep.lmModel : ""})`
+      : ` (musicgen-${config.local.size})`
+    : "";
+  console.log(`    Backend:     ${config.provider}${localLabel}`);
   console.log(`    Volume:      ${config.volume}`);
-  console.log(`    Cache/mood:  ${config.cacheSizePerMood} track(s)`);
+  console.log(
+    `    Cache/mood:  ${config.cacheSizePerMood} track(s)${config.provider === "local" ? " for local warmup/rotation" : ""}`
+  );
   console.log(
     `    Genres:      ${config.excludedGenres.length > 0 ? `${GENRES.length - config.excludedGenres.length}/${GENRES.length} enabled` : "all enabled"}`
   );
@@ -518,7 +593,15 @@ function printSummary(config: ReturnType<typeof loadConfig>): void {
     `    Vocals:      ${config.vocals ? "on (Haiku writes lyrics about your code)" : "off (instrumental)"}`
   );
   console.log(
-    `    Cache-only:  ${config.cacheOnlyMode ? "on (no new generation — zero credits)" : "off (generate as needed)"}`
+    `    Cache-only:  ${
+      config.cacheOnlyMode
+        ? config.provider === "local"
+          ? "on (reuse local cache only)"
+          : "on (no new generation — zero credits)"
+        : config.provider === "local"
+          ? "off (generate locally as needed)"
+          : "off (generate as needed)"
+    }`
   );
   console.log("");
 }

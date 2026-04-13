@@ -2,31 +2,24 @@
 /**
  * install-local.mjs
  *
- * Bootstraps the local MusicGen worker:
+ * Bootstraps the local music worker (ACE-Step or MusicGen fallback):
  *   1. Ensures `uv` is installed (idempotent — no-op if present).
- *   2. Creates a venv at ~/.vibe/venv pinned to Python 3.11 (audiocraft is
- *      currently picky about newer Pythons).
- *   3. Installs torch + torchaudio from the right wheel index for the host:
- *        - macOS (any arch)        → default PyPI (MPS works on Apple Silicon)
- *        - Linux/Win + Nvidia GPU  → https://download.pytorch.org/whl/cu121
- *        - Linux/Win, no GPU       → https://download.pytorch.org/whl/cpu
- *      Detection of Nvidia is via `nvidia-smi -L`. CPU mode is supported but
- *      we warn loudly because MusicGen on CPU is unusably slow (minutes per
- *      30s clip).
- *   4. Installs audiocraft from python/requirements.txt.
- *   5. Patches ~/.vibe/config.json with provider="local" and a populated
- *      `local` block (pythonPath, modelCacheDir, default size/device, port).
+ *   2. Creates a venv at ~/.vibe/venv pinned to Python 3.11.
+ *   3. Verifies system ffmpeg is installed for mp3 encoding.
+ *   4. Installs torch + torchaudio from the right wheel index for the host.
+ *   5. Installs model-specific dependencies (ace-step or audiocraft).
+ *   6. Patches ~/.vibe/config.json with provider="local" and a populated
+ *      `local` block (pythonPath, modelCacheDir, backend, device, port).
  *
  * Re-running is safe: each step checks state before acting and exits cleanly
  * if there's nothing to do.
  *
- * Args: --size <small|medium|large>  default: medium
- *       --device <auto|mps|cuda|cpu> default: auto
- *       --cuda <version|none>        default: unset (use PyTorch's default PyPI
- *                                    wheel, which currently bundles CUDA 12.x).
- *                                    Example: --cuda 12.4 → cu124 wheel index,
- *                                    --cuda 12.8 → cu128, --cuda none → same as
- *                                    unset (no --index-url).
+ * Args: --backend <ace-step|musicgen>   default: auto-detect from hardware
+ *       --size <small|medium|large>     default: medium (musicgen only)
+ *       --dit-model <model-id>          ACE-Step DiT model
+ *       --lm-model <model-id>           ACE-Step LM model (optional)
+ *       --device <auto|mps|cuda|cpu>    default: auto
+ *       --cuda <version|none>           default: unset (PyTorch default)
  */
 
 import {
@@ -59,11 +52,18 @@ const PY_BIN = IS_WINDOWS
 let UV_BIN = resolveUvBinary() ?? "uv";
 
 const args = parseArgs(process.argv.slice(2));
-const size = args.size ?? "medium";
+const installChoice = recommendInstallChoice();
+const backend = args.backend ?? installChoice.backend;
+const size = args.size ?? installChoice.size ?? "medium";
+const ditModel = args["dit-model"] ?? installChoice.ditModel ?? "acestep-v15-turbo";
+const lmModel = args["lm-model"] ?? installChoice.lmModel ?? null;
 const device = args.device ?? "auto";
-const cudaArg = args.cuda ?? null; // e.g. "12.4", "12.8", "none", or null
+const cudaArg = args.cuda ?? null;
 
-if (!["small", "medium", "large"].includes(size)) {
+if (!["ace-step", "musicgen"].includes(backend)) {
+  fail(`--backend must be one of ace-step|musicgen (got: ${backend})`);
+}
+if (backend === "musicgen" && !["small", "medium", "large"].includes(size)) {
   fail(`--size must be one of small|medium|large (got: ${size})`);
 }
 if (!["auto", "mps", "cuda", "cpu"].includes(device)) {
@@ -84,28 +84,38 @@ async function main() {
 
   if (platform() === "darwin" && arch() !== "arm64") {
     fail(
-      "Local MusicGen is only supported on Apple Silicon Macs. Intel Macs should use the ElevenLabs backend instead."
+      "Local generation is only supported on Apple Silicon Macs. Intel Macs should use the ElevenLabs backend instead."
     );
   }
 
   banner("vibe-while-u-vibe :: local backend installer");
   console.log(`  Platform: ${platform()} ${arch()}`);
   console.log(`  Vibe dir: ${VIBE_DIR}`);
-  console.log(`  Model size: ${size}`);
+  if (!args.backend) {
+    console.log(`  Selection: auto (${installChoice.reason})`);
+  }
+  console.log(`  Backend: ${backend}`);
+  if (backend === "musicgen") {
+    console.log(`  Model size: ${size}`);
+  } else {
+    console.log(`  DiT model: ${ditModel}`);
+    console.log(`  LM model: ${lmModel ?? "(none)"}`);
+  }
   console.log("");
 
-  // 1. Ensure uv
   ensureUv();
-
-  // 2. Create venv
   createVenv();
+  ensureFfmpeg();
 
-  // 3. Install torch + audiocraft
   const torchPlan = decideTorchInstall();
   installTorch(torchPlan);
-  installAudiocraft();
 
-  // 4. Patch config
+  if (backend === "musicgen") {
+    installAudiocraft();
+  } else {
+    installAceStep();
+  }
+
   patchConfig(torchPlan);
 
   banner("Local backend installed!");
@@ -113,8 +123,6 @@ async function main() {
   console.log("  session) — the daemon will spawn the Python worker on boot.");
   console.log("");
   console.log(`  Models will land in: ${MODEL_CACHE_DIR}`);
-  console.log("  First generation downloads ~1.5–13 GB of weights depending on");
-  console.log("  the chosen size, and takes 30–90s to load on subsequent boots.");
   console.log("");
 }
 
@@ -122,12 +130,15 @@ function parseArgs(argv) {
   const out = {};
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a === "--size") out.size = argv[++i];
+    if (a === "--backend") out.backend = argv[++i];
+    else if (a === "--size") out.size = argv[++i];
+    else if (a === "--dit-model") out["dit-model"] = argv[++i];
+    else if (a === "--lm-model") out["lm-model"] = argv[++i];
     else if (a === "--device") out.device = argv[++i];
     else if (a === "--cuda") out.cuda = argv[++i];
     else if (a === "-h" || a === "--help") {
       console.log(
-        "Usage: node scripts/install-local.mjs [--size small|medium|large] [--device auto|mps|cuda|cpu] [--cuda <major.minor>|none]"
+        "Usage: node scripts/install-local.mjs [--backend ace-step|musicgen] [--size small|medium|large] [--dit-model <id>] [--lm-model <id>] [--device auto|mps|cuda|cpu] [--cuda <major.minor>|none]"
       );
       process.exit(0);
     }
@@ -211,6 +222,18 @@ function createVenv() {
   }
 }
 
+function ensureFfmpeg() {
+  step("Checking for ffmpeg");
+  const probe = spawnSync("ffmpeg", ["-version"], { stdio: "ignore" });
+  if (probe.status === 0) {
+    console.log("  ffmpeg already installed.");
+    return;
+  }
+  fail(
+    "ffmpeg is required for local generation so output can be encoded as mp3. Install it (e.g. `brew install ffmpeg`) and re-run."
+  );
+}
+
 function decideTorchInstall() {
   // Returns { kind, indexArgs, label } describing how to install torch.
   //
@@ -249,10 +272,7 @@ function decideTorchInstall() {
       "  WARNING: no Nvidia GPU detected. Falling back to CPU torch wheels."
     );
     console.warn(
-      "  MusicGen on CPU is *very* slow (multiple minutes per 30s clip)."
-    );
-    console.warn(
-      "  Consider --device cpu only for testing the wiring, not for daily use."
+      "  Local generation on CPU is *very* slow. Consider --device cpu only for testing."
     );
     return {
       kind: "cpu",
@@ -311,8 +331,6 @@ function installTorch(plan) {
 
 function installAudiocraft() {
   step("Installing audiocraft");
-  // Use the requirements.txt rather than inlining the version so the pin
-  // lives in one place. uv pip install -r works the same as pip's flag.
   if (!existsSync(REQUIREMENTS_PATH)) {
     fail(
       `Requirements file not found at ${REQUIREMENTS_PATH} — reinstall the package.`
@@ -325,6 +343,24 @@ function installAudiocraft() {
   );
   if (r.status !== 0) {
     fail("audiocraft install failed — see output above.");
+  }
+}
+
+function installAceStep() {
+  step("Installing ACE-Step dependencies");
+  const aceReqPath = join(REPO_ROOT, "python", "requirements-ace-step.txt");
+  if (!existsSync(aceReqPath)) {
+    fail(
+      `ACE-Step requirements file not found at ${aceReqPath} — reinstall the package.`
+    );
+  }
+  const r = spawnSync(
+    UV_BIN,
+    ["pip", "install", "--python", PY_BIN, "-r", aceReqPath],
+    { stdio: "inherit" }
+  );
+  if (r.status !== 0) {
+    fail("ACE-Step dependency install failed — see output above.");
   }
 }
 
@@ -352,16 +388,21 @@ function patchConfig(torchPlan) {
   }
 
   config.provider = "local";
-  // Local backend can't do vocals — force off so the daemon never even tries.
   config.vocals = false;
   config.local = {
-    backend: "musicgen",
+    backend,
     size,
     device: defaultDevice,
     workerPort: config?.local?.workerPort ?? 7774,
     pythonPath: PY_BIN,
     modelCacheDir: MODEL_CACHE_DIR,
   };
+  if (backend === "ace-step") {
+    config.local.aceStep = {
+      ditModel,
+      lmModel: lmModel || null,
+    };
+  }
 
   writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + "\n", {
     mode: 0o600,
@@ -373,7 +414,145 @@ function patchConfig(torchPlan) {
       /* best effort */
     }
   }
-  console.log(`  Wrote local config: size=${size} device=${defaultDevice}`);
+  const backendLabel =
+    backend === "ace-step"
+      ? `${ditModel}${lmModel ? ` + ${lmModel}` : " (DiT only)"}`
+      : `musicgen-${size}`;
+  console.log(`  Wrote local config: ${backendLabel}, device=${defaultDevice}`);
+}
+
+function recommendInstallChoice() {
+  if (platform() === "darwin" && arch() === "arm64") {
+    const mem = detectAppleSiliconMemory() ?? 0;
+    if (mem < 8) {
+      return musicgenRec(
+        "small",
+        `${mem} GB unified memory: falling back to MusicGen small`
+      );
+    }
+    if (mem < 16) {
+      return aceRec(
+        "acestep-v15-turbo",
+        null,
+        `${mem} GB unified memory: ACE-Step turbo DiT only`
+      );
+    }
+    if (mem < 24) {
+      return aceRec(
+        "acestep-v15-turbo",
+        "acestep-5Hz-lm-0.6B",
+        `${mem} GB unified memory: ACE-Step turbo + small LM`
+      );
+    }
+    if (mem < 32) {
+      return aceRec(
+        "acestep-v15-sft",
+        "acestep-5Hz-lm-1.7B",
+        `${mem} GB unified memory: ACE-Step SFT + medium LM`
+      );
+    }
+    if (mem < 48) {
+      return aceRec(
+        "acestep-v15-xl-turbo",
+        "acestep-5Hz-lm-1.7B",
+        `${mem} GB unified memory: ACE-Step XL turbo + medium LM`
+      );
+    }
+    return aceRec(
+      "acestep-v15-xl-sft",
+      "acestep-5Hz-lm-4B",
+      `${mem} GB unified memory: ACE-Step XL SFT + large LM`
+    );
+  }
+
+  if (platform() === "linux" || platform() === "win32") {
+    const vramGb = detectNvidiaVram();
+    if (vramGb === undefined) {
+      return musicgenRec(
+        "small",
+        "CPU-only system: falling back to MusicGen small"
+      );
+    }
+    if (vramGb <= 6) {
+      return aceRec(
+        "acestep-v15-turbo",
+        null,
+        `${vramGb} GB VRAM: ACE-Step turbo DiT only`
+      );
+    }
+    if (vramGb < 12) {
+      return aceRec(
+        "acestep-v15-turbo",
+        "acestep-5Hz-lm-0.6B",
+        `${vramGb} GB VRAM: ACE-Step turbo + small LM`
+      );
+    }
+    if (vramGb < 16) {
+      return aceRec(
+        "acestep-v15-sft",
+        "acestep-5Hz-lm-1.7B",
+        `${vramGb} GB VRAM: ACE-Step SFT + medium LM`
+      );
+    }
+    if (vramGb < 20) {
+      return aceRec(
+        "acestep-v15-xl-turbo",
+        "acestep-5Hz-lm-1.7B",
+        `${vramGb} GB VRAM: ACE-Step XL turbo + medium LM`
+      );
+    }
+    if (vramGb < 24) {
+      return aceRec(
+        "acestep-v15-xl-sft",
+        "acestep-5Hz-lm-1.7B",
+        `${vramGb} GB VRAM: ACE-Step XL SFT + medium LM`
+      );
+    }
+    return aceRec(
+      "acestep-v15-xl-sft",
+      "acestep-5Hz-lm-4B",
+      `${vramGb} GB VRAM: ACE-Step XL SFT + large LM`
+    );
+  }
+
+  return musicgenRec("small", "Unsupported platform fallback: MusicGen small");
+}
+
+function detectAppleSiliconMemory() {
+  const r = spawnSync("sysctl", ["-n", "hw.memsize"], { stdio: "pipe" });
+  if (r.status !== 0) return undefined;
+  const bytes = parseInt(r.stdout.toString().trim(), 10);
+  if (Number.isNaN(bytes)) return undefined;
+  return Math.round(bytes / (1024 * 1024 * 1024));
+}
+
+function detectNvidiaVram() {
+  const r = spawnSync(
+    "nvidia-smi",
+    ["--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+    { stdio: "pipe" }
+  );
+  if (r.status !== 0) return undefined;
+  const mb = parseInt(r.stdout.toString().trim().split("\n")[0], 10);
+  if (Number.isNaN(mb)) return undefined;
+  return Math.round(mb / 1024);
+}
+
+function aceRec(ditModel, lmModel, reason) {
+  return {
+    backend: "ace-step",
+    ditModel,
+    lmModel,
+    reason,
+  };
+}
+
+function musicgenRec(size, reason) {
+  return {
+    backend: "musicgen",
+    size,
+    reason,
+  };
 }
 
 function ensureDir(p) {

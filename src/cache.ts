@@ -9,8 +9,8 @@ import type { Mood } from "./moods.js";
 // tracks bleed through their instrumental rotation.
 //
 // Layout:
-//   ~/.vibe/cache/instrumental/<mood>/*.mp3  ← rotated
-//   ~/.vibe/cache/vocals/<mood>/*.mp3        ← kept around for /vibe where,
+//   ~/.vibe/cache/instrumental/<mood>/*.{mp3,wav}  ← rotated
+//   ~/.vibe/cache/vocals/<mood>/*.{mp3,wav}        ← kept around for /vibe where,
 //                                              never rotated (every vocal
 //                                              track is session-specific)
 export function getCacheDir(mood: Mood, instrumental: boolean): string {
@@ -28,7 +28,7 @@ export function getCachedTracks(mood: Mood): string[] {
   const dir = getCacheDir(mood, true);
   try {
     return readdirSync(dir)
-      .filter((f) => f.endsWith(".mp3"))
+      .filter((f) => f.endsWith(".mp3") || f.endsWith(".wav"))
       .map((f) => join(dir, f));
   } catch {
     return [];

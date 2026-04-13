@@ -13,6 +13,7 @@
     "dist",
     "scripts/install-local.mjs",
     "python/worker.py",
+    "python/requirements-ace-step.txt",
     "python/requirements.txt",
     "README.md",
     "LICENSE"

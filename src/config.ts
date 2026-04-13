@@ -4,12 +4,37 @@ import { homedir } from "node:os";
 
 export type Provider = "elevenlabs" | "local";
 export type LocalModelSize = "small" | "medium" | "large";
-export type LocalDevice = "mps" | "cuda" | "auto";
+export type LocalDevice = "mps" | "cuda" | "cpu" | "auto";
+export type LocalBackend = "ace-step" | "musicgen";
+
+export type AceStepDitModel =
+  | "acestep-v15-turbo"
+  | "acestep-v15-sft"
+  | "acestep-v15-xl-turbo"
+  | "acestep-v15-xl-sft";
+
+export type AceStepLmModel =
+  | "acestep-5Hz-lm-0.6B"
+  | "acestep-5Hz-lm-1.7B"
+  | "acestep-5Hz-lm-4B"
+  | null;
+
+export interface AceStepConfig {
+  ditModel: AceStepDitModel;
+  lmModel: AceStepLmModel;
+}
+
+export const DEFAULT_ACE_STEP_CONFIG: AceStepConfig = {
+  ditModel: "acestep-v15-turbo",
+  lmModel: null,
+};
 
 export interface LocalConfig {
-  /** Only "musicgen" is supported today; reserved for future backends. */
-  backend: "musicgen";
+  backend: LocalBackend;
+  /** MusicGen model size — only used when backend === "musicgen". */
   size: LocalModelSize;
+  /** ACE-Step model selection — only used when backend === "ace-step". */
+  aceStep?: AceStepConfig;
   /** "auto" resolves at worker startup via torch's device probes. */
   device: LocalDevice;
   /** Port the Python HTTP worker binds to (loopback only). */
@@ -99,6 +124,12 @@ export function loadConfig(): VibeConfig {
   // edited config.json and old configs migrated to provider=local.
   if (config.provider === "local") {
     config.vocals = false;
+    if (config.local?.backend === "ace-step" && !config.local.aceStep) {
+      config.local = {
+        ...config.local,
+        aceStep: { ...DEFAULT_ACE_STEP_CONFIG },
+      };
+    }
   }
   return config;
 }
@@ -117,4 +148,3 @@ export function getElevenLabsApiKey(config: VibeConfig): string | null {
   // users override a stored key without editing ~/.vibe/config.json.
   return process.env.ELEVENLABS_API_KEY || config.elevenLabsApiKey || null;
 }
-

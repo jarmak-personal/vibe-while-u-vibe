@@ -19,11 +19,16 @@ The daemon picks one of two music generators at boot via `config.provider`:
 
 - **`elevenlabs`** (default) — cloud, paid, supports vocals. Needs an API key.
   Burns ~1,500 credits/min; Creator tier (~$22/mo) = ~35 tracks.
-- **`local`** — Meta's MusicGen via [audiocraft](https://github.com/facebookresearch/audiocraft).
-  Free, runs on the user's machine, **instrumental only** (vocals are forced
-  off in `loadConfig()` whenever `provider === "local"`). Needs Apple Silicon
-  (MPS) or an Nvidia GPU + CUDA 12 for usable speed; CPU works but is too
-  slow for daily use (multiple minutes per 30s clip).
+- **`local`** — ACE-Step (primary) or Meta's MusicGen (fallback) for on-device
+  instrumental generation. Free, runs on the user's machine, **instrumental
+  only** (vocals are forced off in `loadConfig()` whenever `provider ===
+  "local"`). Needs Apple Silicon (MPS) or an Nvidia GPU + CUDA 12 for usable
+  speed; CPU works but is too slow for daily use.
+
+  The setup CLI auto-detects hardware (VRAM / unified memory) and recommends
+  an ACE-Step model configuration. MusicGen is kept as a fallback for very
+  low-memory Macs (< 8 GB unified memory) and CPU-only systems. Model
+  selection logic lives in `src/local-model-selector.ts`.
 
 Local setup (`npm run setup:local`):
 
@@ -37,13 +42,12 @@ Local setup (`npm run setup:local`):
      pin a specific CTK with `--cuda 12.4` etc., which routes to the
      matching `cu{major}{minor}` wheel index.
    - Linux/Windows, no GPU → `https://download.pytorch.org/whl/cpu`
-4. Installs `audiocraft==1.3.0` from `python/requirements.txt`.
-5. Writes `provider="local"` and the `local` config block (pythonPath,
-   modelCacheDir, size, device, workerPort) into `~/.vibe/config.json`.
-
-Model sizes (`facebook/musicgen-{size}`): `small` ~1.5 GB, `medium` ~3.3 GB
-(recommended), `large` ~13 GB. Models cache to `~/.vibe/models` via
-`HF_HOME` so `npm run uninstall` can clean them up.
+4. Installs ACE-Step deps from `python/requirements-ace-step.txt` (or
+   `audiocraft==1.3.0` from `python/requirements.txt` for the MusicGen
+   fallback).
+5. Writes `provider="local"` and the `local` config block (backend,
+   aceStep/size, pythonPath, modelCacheDir, device, workerPort) into
+   `~/.vibe/config.json`.
 
 At runtime the daemon spawns `python/worker.py` as a child process. The
 worker hosts the model, prints `VIBE_WORKER_READY` on stdout when loaded,
@@ -79,15 +83,16 @@ Smoke-ci restores its swapped `claude-headless` stub in `finally`; the injection
 - `src/generators/types.ts` — `MusicGenerator` interface, `GenerateOptions`, error classes
 - `src/generators/index.ts` — `createGenerator(config)` factory + `StubGenerator` for degraded mode
 - `src/generators/elevenlabs.ts` — ElevenLabs Music API generator
-- `src/generators/local.ts` — supervises the Python MusicGen worker over loopback HTTP
-- `python/worker.py` — long-running HTTP server hosting `audiocraft.MusicGen`
+- `src/generators/local.ts` — supervises the Python worker (ACE-Step or MusicGen) over loopback HTTP
+- `src/local-model-selector.ts` — hardware-aware ACE-Step/MusicGen model recommendation
+- `python/worker.py` — long-running HTTP server hosting the local model
 - `src/vibe-classifier.ts` — LLM-powered mood classification via Haiku
 - `src/playlist.ts` — track cache, queue, and loop management; takes a `MusicGenerator` via DI
 - `src/moods.ts` — mood definitions + music style prompts
 - `src/hooks/` — Node scripts (.mjs) for CC hook integration
 - `src/status-line.mjs` — CC status line display script
 - `src/setup.ts` — interactive setup CLI (branches on backend choice)
-- `scripts/install-local.mjs` — uv + venv + torch + audiocraft bootstrap
+- `scripts/install-local.mjs` — uv + venv + torch + model deps bootstrap
 - `src/skills/vibe/SKILL.md` — single user-invocable Claude Code skill that talks to the daemon
 - `src/skill-guidance/{local,elevenlabs}.md` — plain-markdown backend rules, installed to `~/.vibe/skill-guidance/` and read on demand by the `vibe` skill (kept outside `src/skills/` so their frontmatter isn't loaded into every session's context)
 

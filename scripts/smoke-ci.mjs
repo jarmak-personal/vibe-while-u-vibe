@@ -145,49 +145,52 @@ try {
     }
   }
 
-  const localCaptured = [];
-  const localMockGenerator = {
-    name: "local-musicgen",
-    promptStyle: "musicgen",
-    async init() {},
-    async shutdown() {},
-    async generateTrack(opts) {
-      localCaptured.push({ at: Date.now(), opts });
-      return FAKE_MP3;
-    },
-  };
+  for (const promptStyle of ["ace-step", "musicgen"]) {
+    const localCaptured = [];
+    const localMockGenerator = {
+      name: `local-${promptStyle}`,
+      promptStyle,
+      async init() {},
+      async shutdown() {},
+      async generateTrack(opts) {
+        localCaptured.push({ at: Date.now(), opts });
+        return FAKE_MP3;
+      },
+    };
 
-  const localPlaylist = new Playlist({
-    volume: 0,
-    excludedGenres: [],
-    interestingVibes: false,
-    vocals: false,
-    genreHint: null,
-    cacheSizePerMood: 3,
-    cacheOnlyMode: false,
-    generator: localMockGenerator,
-  });
+    const localPlaylist = new Playlist({
+      volume: 0,
+      excludedGenres: [],
+      interestingVibes: false,
+      vocals: false,
+      genreHint: null,
+      cacheSizePerMood: 3,
+      cacheOnlyMode: false,
+      generator: localMockGenerator,
+    });
 
-  await localPlaylist.switchMood("focus", null, true);
-  await new Promise((r) => setImmediate(r));
+    await localPlaylist.switchMood("focus", null, true);
+    await new Promise((r) => setImmediate(r));
+    localPlaylist.stop();
 
-  if (localCaptured.length === 0) {
-    console.log("❌ local generator.generateTrack was never called");
-    exitCode = 1;
-  } else {
+    if (localCaptured.length === 0) {
+      console.log(`❌ ${promptStyle} local generator.generateTrack was never called`);
+      exitCode = 1;
+      continue;
+    }
+
     const localPrompt = localCaptured[localCaptured.length - 1].opts.musicPrompt;
     if (!localPrompt.startsWith("Instrumental ")) {
-      console.log("❌ local prompt should start with 'Instrumental '");
+      console.log(`❌ ${promptStyle} local prompt should start with 'Instrumental '`);
       exitCode = 1;
     }
     if (localPrompt.includes("instrumental only")) {
-      console.log("❌ local prompt should use the MusicGen-specific natural-language builder");
+      console.log(`❌ ${promptStyle} local prompt should use the local natural-language builder`);
       exitCode = 1;
     }
   }
 
   playlist.stop();
-  localPlaylist.stop();
 
   if (exitCode === 0) {
     console.log("✅ smoke-ci: classifier → playlist → generator wiring intact");

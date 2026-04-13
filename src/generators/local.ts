@@ -4,7 +4,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, renameSync, unlinkSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { LocalConfig } from "../config.js";
+import { DEFAULT_ACE_STEP_CONFIG, type LocalConfig } from "../config.js";
 import { getCacheDir } from "../cache.js";
 import {
   type GenerateOptions,
@@ -19,8 +19,9 @@ const HEALTH_POLL_INTERVAL_MS = 250;
 const HEALTH_READY_TIMEOUT_MS = 5_000;
 
 /**
- * Supervises a Python worker subprocess that hosts a MusicGen model and
- * serves HTTP generation requests over loopback. Lifecycle:
+ * Supervises a Python worker subprocess that hosts a local music model
+ * (ACE-Step or MusicGen) and serves HTTP generation requests over loopback.
+ * Lifecycle:
  *
  *   init()     → spawn worker, wait for VIBE_WORKER_READY on stdout
  *   generate() → POST /generate (one in flight thanks to playlist genLock)
@@ -33,8 +34,8 @@ const HEALTH_READY_TIMEOUT_MS = 5_000;
  * daemon silently cycling a crashed worker forever.
  */
 export class LocalGenerator implements MusicGenerator {
-  readonly name = "local-musicgen";
-  readonly promptStyle = "musicgen" as const;
+  readonly name: string;
+  readonly promptStyle: "musicgen" | "ace-step";
   private proc: ChildProcess | null = null;
   private readyPromise: Promise<void> | null = null;
   private readonly token: string;
@@ -45,6 +46,9 @@ export class LocalGenerator implements MusicGenerator {
     this.config = config;
     this.port = config.workerPort;
     this.token = randomBytes(16).toString("hex");
+    const isAce = config.backend === "ace-step";
+    this.name = isAce ? "local-ace-step" : "local-musicgen";
+    this.promptStyle = isAce ? "ace-step" : "musicgen";
   }
 
   async init(): Promise<void> {
@@ -81,13 +85,10 @@ export class LocalGenerator implements MusicGenerator {
     const cacheDir = getCacheDir(opts.mood, true);
     const filename = `${opts.mood}-${randomUUID().slice(0, 8)}.mp3`;
     const outputPath = join(cacheDir, filename);
-    const tmpPath = outputPath + ".tmp";
+    const tmpPath = outputPath.replace(/\.mp3$/, ".tmp.mp3");
 
     const body = {
       prompt: opts.musicPrompt,
-      // MusicGen can generate clips up to ~30s comfortably. Going longer
-      // is possible but quality drops and memory climbs. 30s loops well
-      // enough once the playlist's loop-on-finish handler kicks in.
       duration_s: 30,
       output_path: tmpPath,
     };
@@ -150,22 +151,30 @@ export class LocalGenerator implements MusicGenerator {
     }
     ensureDir(this.config.modelCacheDir);
 
+    const workerArgs = [
+      workerPath,
+      "--port", String(this.port),
+      "--device", this.config.device,
+      "--backend", this.config.backend,
+    ];
+    if (this.config.backend === "ace-step") {
+      const aceStep = this.config.aceStep ?? DEFAULT_ACE_STEP_CONFIG;
+      workerArgs.push("--dit-model", aceStep.ditModel);
+      if (aceStep.lmModel) {
+        workerArgs.push("--lm-model", aceStep.lmModel);
+      }
+    } else {
+      workerArgs.push("--size", this.config.size);
+    }
+
     const proc = spawn(
       this.config.pythonPath,
-      [
-        workerPath,
-        "--port", String(this.port),
-        "--size", this.config.size,
-        "--device", this.config.device,
-      ],
+      workerArgs,
       {
         stdio: ["ignore", "pipe", "pipe"],
         env: {
           ...process.env,
           VIBE_WORKER_TOKEN: this.token,
-          // audiocraft reads HF_HOME for model downloads — redirecting the
-          // cache here keeps everything under ~/.vibe/models so uninstall
-          // can clean it up in one shot.
           HF_HOME: this.config.modelCacheDir,
           TRANSFORMERS_CACHE: this.config.modelCacheDir,
         },
@@ -173,9 +182,7 @@ export class LocalGenerator implements MusicGenerator {
     );
     this.proc = proc;
 
-    // Stderr → daemon stderr, unmodified, so crash tracebacks surface in
-    // the daemon log. No filter — MusicGen prints a ton of warnings on
-    // first run that are harmless.
+    // Stderr → daemon stderr so crash tracebacks surface in the daemon log.
     proc.stderr?.on("data", (chunk) => {
       process.stderr.write(`[worker] ${chunk}`);
     });

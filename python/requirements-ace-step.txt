@@ -1,0 +1,7 @@
+# ACE-Step's PyPI source package is currently broken: setup.py expects
+# requirements.txt, but the published sdist omits it. Install from the
+# official GitHub repo instead, pinned to a known commit for stability.
+# torch + torchaudio are installed separately by scripts/install-local.mjs
+# with the correct wheel index for the platform.
+ace_step @ git+https://github.com/ace-step/ACE-Step.git@1bee4c9f5b43e30995f8d4d33b3919197ce1bd68
+soundfile>=0.12.1

@@ -85,7 +85,7 @@ export class Playlist {
   }
 
   private buildPrompt(mood: Mood, vocals: boolean): string {
-    if (this.generator.promptStyle === "musicgen") {
+    if (this.generator.promptStyle === "musicgen" || this.generator.promptStyle === "ace-step") {
       return buildLocalMusicPrompt(
         mood,
         this.effectiveExcludedGenres(),
@@ -549,7 +549,7 @@ export class Playlist {
 
     try {
       const prompt =
-        this.generator.promptStyle === "musicgen"
+        this.generator.promptStyle === "musicgen" || this.generator.promptStyle === "ace-step"
           ? buildLocalMusicPrompt(
               target,
               this.opts.excludedGenres,

@@ -9,7 +9,7 @@ export interface GenerateOptions {
 
 export interface MusicGenerator {
   readonly name: string;
-  readonly promptStyle?: "default" | "musicgen";
+  readonly promptStyle?: "default" | "musicgen" | "ace-step";
   init(): Promise<void>;
   shutdown(): Promise<void>;
   generateTrack(opts: GenerateOptions): Promise<string>;
