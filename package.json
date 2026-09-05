@@ -50,7 +50,7 @@
     "node": ">=18"
   },
   "dependencies": {
-    "@elevenlabs/elevenlabs-js": "^2.56.0"
+    "@elevenlabs/elevenlabs-js": "^2.66.0"
   },
   "devDependencies": {
     "@types/node": "^26.1.0",
